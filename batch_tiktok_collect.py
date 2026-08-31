@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 
@@ -24,14 +24,37 @@ TITLE_ROOT = Path(r"D:\图片\标题\最终标题")
 LOCAL_IMAGE_ROOT = Path(r"D:\图片")
 OSS_BASE_URL = "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com"
 SHOP_ID = 13781675
-TEMPLATE_TITLE = "tiktok chan pin mo ban"
-TEMPLATE_DETAIL_ID = 3325026487
+DEFAULT_BATCH = "万圣节测试"
+DEFAULT_TEMPLATE = "大地毯"
+TEMPLATES = {
+    "大地毯": {
+        "detail_id": 3325026487,
+        "group_name": "tiktok  大地毯    参数模版",
+    },
+    "非定制毛毯": {
+        "detail_id": 3337135157,
+        "group_name": "tiktok  非定制毛毯   参数模版",
+    },
+    "定制毛毯": {
+        "detail_id": 3337135151,
+        "group_name": "tiktok  定制毛毯   参数模版",
+    },
+}
 VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 def post(endpoint_key: str, body: dict[str, Any]) -> dict[str, Any]:
+    response: dict[str, Any] = {}
     for attempt in range(4):
-        response = server._post_to_miaoshou(server.ENDPOINTS[endpoint_key], body)
+        try:
+            response = server._post_to_miaoshou(server.ENDPOINTS[endpoint_key], body)
+        except RuntimeError as exc:
+            if "httpGatewayTimeout" not in str(exc) and "HTTP 504" not in str(exc):
+                raise
+            if attempt == 3:
+                raise
+            time.sleep(2 + attempt * 2)
+            continue
         if response.get("code") != "accountApiQpsRateLimit":
             return response
         time.sleep(2 + attempt * 2)
@@ -51,13 +74,30 @@ def title_file_for_batch(batch: str) -> Path:
     return TITLE_ROOT / f"最终标题_{batch}.xlsx"
 
 
+def header_key(value: Any) -> str:
+    return re.sub(r"[\s_：:（）()]+", "", str(value or "").strip().lower())
+
+
+def find_columns(ws: Any) -> tuple[int, int, int]:
+    seq_names = {"序号", "编号", "no", "number", "id"}
+    title_names = {"标题", "最终英文标题", "英文标题", "产品标题", "title", "producttitle"}
+    for row in range(1, min(ws.max_row, 10) + 1):
+        headers = {header_key(ws.cell(row, col).value): col for col in range(1, ws.max_column + 1)}
+        seq_col = next((headers[name] for name in seq_names if name in headers), None)
+        title_col = next((headers[name] for name in title_names if name in headers), None)
+        if seq_col and title_col:
+            return row, seq_col, title_col
+    raise ValueError("Excel 表头必须包含「序号」和「标题」两列；标题列也可以叫「最终英文标题」或 title。")
+
+
 def read_items(title_file: Path) -> list[dict[str, Any]]:
     wb = load_workbook(title_file, data_only=True)
     ws = wb.active
+    header_row, seq_col, title_col = find_columns(ws)
     items: list[dict[str, Any]] = []
-    for row in range(2, ws.max_row + 1):
-        seq = ws.cell(row, 1).value
-        title = ws.cell(row, 3).value
+    for row in range(header_row + 1, ws.max_row + 1):
+        seq = ws.cell(row, seq_col).value
+        title = ws.cell(row, title_col).value
         if seq in (None, "") and title in (None, ""):
             continue
         if not isinstance(seq, (int, float)) or int(seq) != seq:
@@ -69,8 +109,20 @@ def read_items(title_file: Path) -> list[dict[str, Any]]:
     return items
 
 
-def image_urls(batch: str, seq: int) -> list[str]:
-    folder = LOCAL_IMAGE_ROOT / batch / str(seq)
+def image_urls(
+    batch: str,
+    seq: int,
+    local_image_root: Path = LOCAL_IMAGE_ROOT,
+    image_prefix: str | None = None,
+) -> list[str]:
+    prefix = image_prefix or batch
+    folder = local_image_root / str(seq)
+    if folder.exists():
+        url_prefix = prefix
+    else:
+        url_prefix = prefix
+        batch_folder = local_image_root / batch
+        folder = (batch_folder if batch_folder.exists() else local_image_root) / str(seq)
     if not folder.exists():
         raise FileNotFoundError(f"缺少图片文件夹: {folder}")
     files = sorted(
@@ -82,7 +134,7 @@ def image_urls(batch: str, seq: int) -> list[str]:
     if len(files) > 15:
         raise ValueError(f"seq {seq}: 图片数量 {len(files)} 超过妙手限制 15 张")
     return [
-        f"{OSS_BASE_URL}/{urllib.parse.quote(f'{batch}/{seq}/{file.name}', safe='/')}"
+        f"{OSS_BASE_URL}/{urllib.parse.quote(f'{url_prefix}/{seq}/{file.name}', safe='/')}"
         for file in files
     ]
 
@@ -238,13 +290,16 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def previous_successes(batch: str) -> dict[int, dict[str, Any]]:
-    runs = sorted(Path("runs").glob(f"{batch}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+def previous_successes(batch: str, template_detail_id: int, log_dir: Path = Path("runs")) -> dict[int, dict[str, Any]]:
+    runs = sorted(log_dir.glob(f"{batch}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     found: dict[int, dict[str, Any]] = {}
     for path in runs:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        summary = data.get("summary") or {}
+        if summary.get("templateDetailId") != template_detail_id:
             continue
         for item in data.get("results") or []:
             if item.get("status") == "success" and item.get("tiktokDetailId") and item.get("seq") not in found:
@@ -252,42 +307,50 @@ def previous_successes(batch: str) -> dict[int, dict[str, Any]]:
     return found
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", default="万圣节测试")
-    parser.add_argument("--title-file")
-    parser.add_argument("--shop-id", type=int, default=SHOP_ID)
-    parser.add_argument("--template-title", default=TEMPLATE_TITLE)
-    parser.add_argument("--template-detail-id", type=int, default=TEMPLATE_DETAIL_ID)
-    parser.add_argument("--limit", type=int)
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-
-    title_file = Path(args.title_file) if args.title_file else title_file_for_batch(args.batch)
-    batch = batch_from_title_file(title_file)
+def run_batch(
+    *,
+    batch: str,
+    title_file: Path,
+    local_image_root: Path = LOCAL_IMAGE_ROOT,
+    shop_id: int = SHOP_ID,
+    template: str = DEFAULT_TEMPLATE,
+    template_title: str | None = None,
+    template_detail_id: int | None = None,
+    image_prefix: str | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+    reuse_existing: bool = True,
+    log_dir: Path = Path("runs"),
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = Path("runs") / f"{batch}_{run_id}.json"
+    log_path = log_dir / f"{batch}_{run_id}.json"
 
     items = read_items(title_file)
-    if args.limit:
-        items = items[: args.limit]
+    if limit:
+        items = items[:limit]
 
-    template_detail_id = args.template_detail_id or find_template_detail_id(args.template_title, args.shop_id)
-    _, template_info = get_tk_info(template_detail_id, args.shop_id)
-    previous = {} if args.dry_run else previous_successes(batch)
+    if template_detail_id is None and template_title:
+        template_detail_id = find_template_detail_id(template_title, shop_id)
+    if template_detail_id is None:
+        template_detail_id = TEMPLATES[template]["detail_id"]
+    _, template_info = get_tk_info(template_detail_id, shop_id)
+    previous = {} if dry_run or not reuse_existing else previous_successes(batch, template_detail_id, log_dir)
 
     results: list[dict[str, Any]] = []
     for item in items:
         seq = item["seq"]
         result: dict[str, Any] = {"seq": seq, "title": item["title"], "status": "started"}
         try:
-            urls = image_urls(batch, seq)
+            urls = image_urls(batch, seq, local_image_root, image_prefix)
             result["image_count"] = len(urls)
             result["ignored_files"] = ["Thumbs.db"]
             result["url_checks"] = [check_url(url) for url in urls]
-            if args.dry_run:
+            if dry_run:
                 result["status"] = "dry_run_ok"
                 results.append(result)
+                if progress:
+                    progress(result)
                 continue
 
             existing = previous.get(seq)
@@ -296,7 +359,7 @@ def main() -> int:
                 common_id = int(existing.get("commonCollectBoxDetailId") or 0)
                 result["reused_from_log"] = True
                 try:
-                    get_tk_info(detail_id, args.shop_id)
+                    get_tk_info(detail_id, shop_id)
                 except Exception as exc:
                     result["stale_logged_detail"] = {"detailId": detail_id, "error": repr(exc)}
                     existing = None
@@ -304,7 +367,7 @@ def main() -> int:
                 result["reused_from_log"] = False
 
             if not existing:
-                searched = find_existing_by_title(item["title"], args.shop_id)
+                searched = find_existing_by_title(item["title"], shop_id) if reuse_existing else None
                 if searched:
                     detail_id = int(searched["collectBoxDetailId"])
                     common_id = int(searched.get("commonCollectBoxDetailId") or 0)
@@ -314,14 +377,14 @@ def main() -> int:
                         item["title"],
                         urls,
                         template_info,
-                        f"MSBATCH-{batch}-{seq}",
+                        f"MSBATCH-{template}-{batch}-{seq}",
                     )
                     detail_id = claim_to_tiktok(common_id)
                     result["reused_existing"] = False
                 result.setdefault("reused_from_log", False)
 
-            save_from_template(detail_id, args.shop_id, item["title"], urls, template_info)
-            verification = verify_product(detail_id, args.shop_id, item["title"], urls, template_info)
+            save_from_template(detail_id, shop_id, item["title"], urls, template_info)
+            verification = verify_product(detail_id, shop_id, item["title"], urls, template_info)
             result.update(
                 {
                     "status": "success" if all(
@@ -334,13 +397,15 @@ def main() -> int:
                     ) else "verify_failed",
                     "commonCollectBoxDetailId": common_id,
                     "tiktokDetailId": detail_id,
-                    "shopId": args.shop_id,
+                    "shopId": shop_id,
                     "verification": verification,
                 }
             )
         except Exception as exc:
             result.update({"status": "failed", "error": repr(exc)})
         results.append(result)
+        if progress:
+            progress(result)
         write_json(log_path, {"batch": batch, "templateDetailId": template_detail_id, "results": results})
         time.sleep(1.2)
 
@@ -348,15 +413,62 @@ def main() -> int:
     summary = {
         "batch": batch,
         "titleFile": str(title_file),
-        "templateTitle": args.template_title,
+        "imageRoot": str(local_image_root),
+        "imagePrefix": image_prefix or batch,
+        "template": template,
+        "templateTitle": template_title,
         "templateDetailId": template_detail_id,
-        "shopId": args.shop_id,
+        "templateGroupName": TEMPLATES.get(template, {}).get("group_name"),
+        "reuseExisting": reuse_existing,
+        "shopId": shop_id,
         "total": len(results),
         "success": sum(1 for r in results if r["status"] == "success"),
+        "dryRunOk": sum(1 for r in results if r["status"] == "dry_run_ok"),
         "failed": [r for r in results if r["status"] not in ok_statuses],
         "logPath": str(log_path.resolve()),
     }
     write_json(log_path, {"summary": summary, "results": results})
+    return summary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch")
+    parser.add_argument("--title-file")
+    parser.add_argument("--image-root", default=str(LOCAL_IMAGE_ROOT))
+    parser.add_argument("--shop-id", type=int, default=SHOP_ID)
+    parser.add_argument("--template", choices=sorted(TEMPLATES), default=DEFAULT_TEMPLATE)
+    parser.add_argument("--template-title")
+    parser.add_argument("--template-detail-id", type=int)
+    parser.add_argument("--image-prefix")
+    parser.add_argument("--list-templates", action="store_true")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-reuse-existing", action="store_true")
+    args = parser.parse_args()
+
+    if args.list_templates:
+        print(json.dumps(TEMPLATES, ensure_ascii=False, indent=2))
+        return 0
+
+    batch = args.batch or DEFAULT_BATCH
+    title_file = Path(args.title_file) if args.title_file else title_file_for_batch(batch)
+    if args.title_file and not args.batch:
+        batch = batch_from_title_file(title_file)
+
+    summary = run_batch(
+        batch=batch,
+        title_file=title_file,
+        local_image_root=Path(args.image_root),
+        shop_id=args.shop_id,
+        template=args.template,
+        template_title=args.template_title,
+        template_detail_id=args.template_detail_id,
+        image_prefix=args.image_prefix,
+        limit=args.limit,
+        dry_run=args.dry_run,
+        reuse_existing=not args.no_reuse_existing,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if not summary["failed"] else 1
 
