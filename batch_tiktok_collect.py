@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import hmac
 import json
+import os
 import re
 import ssl
-import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -16,16 +19,20 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 
-MIAOSHOU_MCP_DIR = Path(r"C:\Users\Admin\Documents\ChatGPT\codex\miaoshou_mcp")
-sys.path.insert(0, str(MIAOSHOU_MCP_DIR))
-import server  # type: ignore  # noqa: E402
-
 TITLE_ROOT = Path(r"D:\图片\标题\最终标题")
 LOCAL_IMAGE_ROOT = Path(r"D:\图片")
+MIAOSHOU_BASE_URL = os.environ.get("MIAOSHOU_BASE_URL", "https://openapi-erp.91miaoshou.com")
 OSS_BASE_URL = "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com"
 SHOP_ID = 13781675
 DEFAULT_BATCH = "万圣节测试"
 DEFAULT_TEMPLATE = "大地毯"
+ENDPOINTS = {
+    "create_common_collect_product": "/open/v1/product/common_collect_box/common_collect_box/add_common_collect_box_detail",
+    "claim_common_products_to_platform": "/open/v1/product/common_collect_box/common_collect_box/claimed",
+    "search_tk_collect_products": "/open/v1/product/collect_box/tiktok/collect_box/search_collect_box_detail_list",
+    "get_tk_shop_collect_item_info": "/open/v1/product/collect_box/tiktok/collect_box/get_shop_collect_item_info",
+    "save_tk_shop_collect_item_info": "/open/v1/product/collect_box/tiktok/collect_box/save_shop_collect_item_info",
+}
 TEMPLATES = {
     "大地毯": {
         "detail_id": 3325026487,
@@ -41,13 +48,63 @@ TEMPLATES = {
     },
 }
 VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MiaoshouCredentials = tuple[str, str] | None
 
 
-def post(endpoint_key: str, body: dict[str, Any]) -> dict[str, Any]:
+def json_dumps(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def generate_sign(app_secret: str, path: str, timestamp: int, app_key: str, body_json: str) -> str:
+    content = f"{app_secret}{path}{timestamp}{app_key}{body_json}{app_secret}"
+    return hmac.new(
+        app_secret.encode("utf-8"),
+        content.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def default_credentials() -> tuple[str, str]:
+    app_key = os.environ.get("MIAOSHOU_APP_KEY", "").strip()
+    app_secret = os.environ.get("MIAOSHOU_APP_SECRET", "").strip()
+    if not app_key or not app_secret:
+        raise ValueError("缺少妙手 MIAOSHOU_APP_KEY / MIAOSHOU_APP_SECRET；网页账号管理里每个妙手账号需要单独配置。")
+    return app_key, app_secret
+
+
+def post_to_miaoshou(path: str, body: dict[str, Any], credentials: tuple[str, str]) -> dict[str, Any]:
+    app_key, app_secret = credentials
+    body_json = json_dumps(body)
+    timestamp = int(time.time())
+    sign = generate_sign(app_secret, path, timestamp, app_key, body_json)
+    request = urllib.request.Request(
+        f"{MIAOSHOU_BASE_URL}{path}",
+        data=body_json.encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-app-key": app_key,
+            "x-timestamp": str(timestamp),
+            "x-sign": sign,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = response.read().decode("utf-8")
+            return json.loads(payload) if payload else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Miaoshou HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Miaoshou network error: {exc.reason}") from exc
+
+
+def post(endpoint_key: str, body: dict[str, Any], credentials: MiaoshouCredentials = None) -> dict[str, Any]:
     response: dict[str, Any] = {}
     for attempt in range(4):
         try:
-            response = server._post_to_miaoshou(server.ENDPOINTS[endpoint_key], body)
+            path = ENDPOINTS[endpoint_key]
+            response = post_to_miaoshou(path, body, credentials or default_credentials())
         except RuntimeError as exc:
             if "httpGatewayTimeout" not in str(exc) and "HTTP 504" not in str(exc):
                 raise
@@ -101,7 +158,7 @@ def read_items(title_file: Path) -> list[dict[str, Any]]:
         if seq in (None, "") and title in (None, ""):
             continue
         if not isinstance(seq, (int, float)) or int(seq) != seq:
-            raise ValueError(f"row {row}: A列序号不是整数")
+            raise ValueError(f"row {row}: 序号列不是整数")
         title_text = str(title or "").strip()
         if not 25 <= len(title_text) <= 255:
             raise ValueError(f"seq {int(seq)}: 标题长度 {len(title_text)} 不在 25-255 范围")
@@ -149,11 +206,12 @@ def check_url(url: str) -> dict[str, Any]:
         }
 
 
-def find_template_detail_id(template_title: str, shop_id: int) -> int:
+def find_template_detail_id(template_title: str, shop_id: int, credentials: MiaoshouCredentials = None) -> int:
     for page in range(1, 6):
         response = post(
             "search_tk_collect_products",
             {"pageNo": page, "pageSize": 100, "status": "notPublished", "title": template_title},
+            credentials,
         )
         for item in (response.get("data") or {}).get("detailList") or []:
             shops = item.get("collectBoxDetailShopList") or []
@@ -162,8 +220,8 @@ def find_template_detail_id(template_title: str, shop_id: int) -> int:
     raise RuntimeError(f"未找到 TikTok 模板产品: {template_title}")
 
 
-def get_tk_info(detail_id: int, shop_id: int) -> tuple[str, dict[str, Any]]:
-    response = post("get_tk_shop_collect_item_info", {"detailId": detail_id, "shopId": shop_id})
+def get_tk_info(detail_id: int, shop_id: int, credentials: MiaoshouCredentials = None) -> tuple[str, dict[str, Any]]:
+    response = post("get_tk_shop_collect_item_info", {"detailId": detail_id, "shopId": shop_id}, credentials)
     if response.get("result") != "success":
         raise RuntimeError(f"查询 TikTok 详情失败: {response}")
     data = response.get("data") or {}
@@ -174,7 +232,13 @@ def get_tk_info(detail_id: int, shop_id: int) -> tuple[str, dict[str, Any]]:
     return str(oss_md5), info
 
 
-def create_common_product(title: str, urls: list[str], template_info: dict[str, Any], item_num: str) -> int:
+def create_common_product(
+    title: str,
+    urls: list[str],
+    template_info: dict[str, Any],
+    item_num: str,
+    credentials: MiaoshouCredentials = None,
+) -> int:
     body = {
         "title": title,
         "itemNum": item_num[:50],
@@ -189,7 +253,7 @@ def create_common_product(title: str, urls: list[str], template_info: dict[str, 
         "packageWidth": template_info.get("packageWidth") or 45,
         "packageHeight": template_info.get("packageHeight") or 40,
     }
-    response = post("create_common_collect_product", body)
+    response = post("create_common_collect_product", body, credentials)
     if response.get("result") != "success":
         raise RuntimeError(f"创建公共采集箱产品失败: {response}")
     return int((response.get("data") or {})["commonCollectBoxDetailId"])
@@ -204,13 +268,13 @@ def first_template_price(template_info: dict[str, Any]) -> float:
     return 79.49
 
 
-def claim_to_tiktok(common_id: int) -> int:
+def claim_to_tiktok(common_id: int, credentials: MiaoshouCredentials = None) -> int:
     body = {
         "detailSerialNumberPlatformList": [
             {"detailId": common_id, "platform": "tiktok", "serialNumber": 1}
         ]
     }
-    response = server._post_to_miaoshou(server.ENDPOINTS["claim_common_products_to_platform"], body)
+    response = post("claim_common_products_to_platform", body, credentials)
     if response.get("result") != "success":
         raise RuntimeError(f"认领到 TikTok 失败: {response}")
     mapping = ((response.get("data") or {}).get("platformCollectBoxDetailIdMap") or {}).get("tiktok") or {}
@@ -219,11 +283,12 @@ def claim_to_tiktok(common_id: int) -> int:
     return int(mapping[str(common_id)])
 
 
-def find_existing_by_title(title: str, shop_id: int) -> dict[str, Any] | None:
+def find_existing_by_title(title: str, shop_id: int, credentials: MiaoshouCredentials = None) -> dict[str, Any] | None:
     for page in range(1, 6):
         response = post(
             "search_tk_collect_products",
             {"pageNo": page, "pageSize": 100, "status": "notPublished", "title": title},
+            credentials,
         )
         for item in (response.get("data") or {}).get("detailList") or []:
             shops = item.get("collectBoxDetailShopList") or []
@@ -238,8 +303,9 @@ def save_from_template(
     title: str,
     urls: list[str],
     template_info: dict[str, Any],
+    credentials: MiaoshouCredentials = None,
 ) -> dict[str, Any]:
-    oss_md5, _ = get_tk_info(detail_id, shop_id)
+    oss_md5, _ = get_tk_info(detail_id, shop_id, credentials)
     info = copy.deepcopy(template_info)
     info.update(
         {
@@ -261,14 +327,22 @@ def save_from_template(
     response = post(
         "save_tk_shop_collect_item_info",
         {"ossMd5": oss_md5, "detailId": detail_id, "shopId": shop_id, "shopCollectItemInfo": info},
+        credentials,
     )
     if response.get("result") != "success":
         raise RuntimeError(f"保存 TikTok 详情失败: {response}")
     return response
 
 
-def verify_product(detail_id: int, shop_id: int, title: str, urls: list[str], template_info: dict[str, Any]) -> dict[str, Any]:
-    _, info = get_tk_info(detail_id, shop_id)
+def verify_product(
+    detail_id: int,
+    shop_id: int,
+    title: str,
+    urls: list[str],
+    template_info: dict[str, Any],
+    credentials: MiaoshouCredentials = None,
+) -> dict[str, Any]:
+    _, info = get_tk_info(detail_id, shop_id, credentials)
     sizes = [
         value.get("attrValue")
         for prop in info.get("skuPropertyList") or []
@@ -318,10 +392,12 @@ def run_batch(
     template_detail_id: int | None = None,
     image_prefix: str | None = None,
     limit: int | None = None,
+    only_seqs: list[int] | None = None,
     dry_run: bool = False,
     reuse_existing: bool = True,
     log_dir: Path = Path("runs"),
     progress: Callable[[dict[str, Any]], None] | None = None,
+    miaoshou_credentials: MiaoshouCredentials = None,
 ) -> dict[str, Any]:
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"{batch}_{run_id}.json"
@@ -329,12 +405,15 @@ def run_batch(
     items = read_items(title_file)
     if limit:
         items = items[:limit]
+    if only_seqs is not None:
+        allowed = set(only_seqs)
+        items = [item for item in items if int(item["seq"]) in allowed]
 
     if template_detail_id is None and template_title:
-        template_detail_id = find_template_detail_id(template_title, shop_id)
+        template_detail_id = find_template_detail_id(template_title, shop_id, miaoshou_credentials)
     if template_detail_id is None:
         template_detail_id = TEMPLATES[template]["detail_id"]
-    _, template_info = get_tk_info(template_detail_id, shop_id)
+    _, template_info = get_tk_info(template_detail_id, shop_id, miaoshou_credentials)
     previous = {} if dry_run or not reuse_existing else previous_successes(batch, template_detail_id, log_dir)
 
     results: list[dict[str, Any]] = []
@@ -359,7 +438,7 @@ def run_batch(
                 common_id = int(existing.get("commonCollectBoxDetailId") or 0)
                 result["reused_from_log"] = True
                 try:
-                    get_tk_info(detail_id, shop_id)
+                    get_tk_info(detail_id, shop_id, miaoshou_credentials)
                 except Exception as exc:
                     result["stale_logged_detail"] = {"detailId": detail_id, "error": repr(exc)}
                     existing = None
@@ -367,7 +446,7 @@ def run_batch(
                 result["reused_from_log"] = False
 
             if not existing:
-                searched = find_existing_by_title(item["title"], shop_id) if reuse_existing else None
+                searched = find_existing_by_title(item["title"], shop_id, miaoshou_credentials) if reuse_existing else None
                 if searched:
                     detail_id = int(searched["collectBoxDetailId"])
                     common_id = int(searched.get("commonCollectBoxDetailId") or 0)
@@ -378,13 +457,14 @@ def run_batch(
                         urls,
                         template_info,
                         f"MSBATCH-{template}-{batch}-{seq}",
+                        miaoshou_credentials,
                     )
-                    detail_id = claim_to_tiktok(common_id)
+                    detail_id = claim_to_tiktok(common_id, miaoshou_credentials)
                     result["reused_existing"] = False
                 result.setdefault("reused_from_log", False)
 
-            save_from_template(detail_id, shop_id, item["title"], urls, template_info)
-            verification = verify_product(detail_id, shop_id, item["title"], urls, template_info)
+            save_from_template(detail_id, shop_id, item["title"], urls, template_info, miaoshou_credentials)
+            verification = verify_product(detail_id, shop_id, item["title"], urls, template_info, miaoshou_credentials)
             result.update(
                 {
                     "status": "success" if all(
