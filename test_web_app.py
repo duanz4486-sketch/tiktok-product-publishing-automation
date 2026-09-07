@@ -1,5 +1,8 @@
 from pathlib import Path
+import io
+import json
 import tempfile
+import zipfile
 
 import batch_tiktok_collect
 import web_app
@@ -111,6 +114,34 @@ def test_status_labels_and_errors_are_user_friendly() -> None:
     assert "公共采集箱" in web_app.readable_error_text("KeyError('create_common_collect_product')")
 
 
+def test_job_page_hides_oss_image_directory() -> None:
+    job_id = "hide-oss-job"
+    original_jobs = web_app.JOBS.copy()
+    try:
+        with web_app.JOBS_LOCK:
+            web_app.JOBS.clear()
+            web_app.JOBS[job_id] = {
+                "batch": "测试批次",
+                "account_name": "测试妙手账号",
+                "created_by": "网页操作",
+                "template": "大地毯",
+                "status": "done",
+                "image_prefix": "secret/oss/path",
+                "done_count": 1,
+                "total_count": 1,
+                "results": [],
+            }
+        html = web_app.render_job(job_id).decode("utf-8")
+    finally:
+        with web_app.JOBS_LOCK:
+            web_app.JOBS.clear()
+            web_app.JOBS.update(original_jobs)
+
+    assert "OSS 图片目录" not in html
+    assert "secret/oss/path" not in html
+    assert "已处理：1" in html
+
+
 def test_home_uses_saved_miaoshou_accounts_without_web_user() -> None:
     original_load = web_app.load_accounts_config
     original_jobs = web_app.JOBS.copy()
@@ -133,6 +164,11 @@ def test_home_uses_saved_miaoshou_accounts_without_web_user() -> None:
         assert "测试妙手账号" in html
         assert "登录" not in html
         assert "用户名" not in html
+        assert 'id="image_prefix"' not in html
+        assert "OSS 图片目录" not in html
+        assert 'name="image_zip"' in html
+        assert 'name="image_folder"' in html
+        assert "图片来源" in html
     finally:
         web_app.load_accounts_config = original_load  # type: ignore[assignment]
         with web_app.JOBS_LOCK:
@@ -249,9 +285,17 @@ def test_single_form_uses_local_sku_image_upload() -> None:
         html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
 
         assert 'name="sku_image_file_0"' in html
-        assert 'type="file" accept="image/*"' in html
+        assert 'name="image_upload"' in html
+        assert 'id="image_upload_files"' in html
+        assert 'id="image_upload_folder"' in html
+        assert 'id="image_files"' not in html
+        assert 'id="image_zip"' not in html
+        assert "图片文件夹或多张图片" not in html
+        assert 'name="main_video"' in html
+        assert "主图视频" in html
         assert "规格图 URL" not in html
         assert "妙手销售属性" not in html
+        assert 'id="single_prefix"' not in html
         assert 'type="hidden" name="sale_attr_id" value="size"' in html
         assert 'list="spec_name_options"' in html
     finally:
@@ -296,6 +340,7 @@ def test_common_single_product_uses_visible_spec_as_color_dimension() -> None:
             30,
             20,
             5,
+            "https://example.com/video.mp4",
         )
     finally:
         web_app.miaoshou_post = old_post
@@ -312,6 +357,7 @@ def test_common_single_product_uses_visible_spec_as_color_dimension() -> None:
     }
     assert "sizePropName" not in body
     assert "sizeMap" not in body
+    assert body["mainImgVideoUrl"] == "https://example.com/video.mp4"
     assert list(body["skuMap"].keys()) == [";9001;"]
 
 
@@ -445,6 +491,7 @@ def test_save_site_product_fills_shop_warehouse_stock_map() -> None:
             20,
             5,
             {"789": "WH-1"},
+            "https://example.com/video.mp4",
         )
     finally:
         web_app.miaoshou_post = old_post
@@ -452,6 +499,7 @@ def test_save_site_product_fills_shop_warehouse_stock_map() -> None:
     info = captured["body"]["siteCollectItemInfo"]
     assert info["collectBoxDetailShopList"] == [{"shopId": 789, "site": web_app.SITE}]
     assert "shopId" not in info
+    assert info["mainImgVideoUrl"] == "https://example.com/video.mp4"
     sku = next(iter(info["skuMap"].values()))
     assert sku["shopIdToWarehouseIdAndStockMap"] == {"789": {"WH-1": "10"}}
 
@@ -575,12 +623,348 @@ def test_single_form_shows_required_category_attrs_before_package_fields() -> No
         ) = originals
 
 
+def test_deepseek_ai_suggestion_uses_images_and_returns_clean_attrs() -> None:
+    originals = (web_app.load_ai_settings, web_app.urllib.request.urlopen)
+    temp_root = Path(tempfile.mkdtemp())
+    image_path = temp_root / "1.jpg"
+    image_path.write_bytes(b"fake-image")
+    captured = {}
+    long_description = "<p>" + ("Soft striped throw blanket for home decor and everyday room styling. " * 18) + "</p>"
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "description_html": long_description,
+                                        "attributes": [
+                                            {"attrId": "material", "valueId": "polyester", "valueName": "Polyester"},
+                                            {"attrId": "pattern", "valueName": "Striped"},
+                                            {"attrId": "unknown", "valueName": "Ignored"},
+                                        ],
+                                        "warnings": ["材质来自标题和图片"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["auth"] = request.headers.get("Authorization")
+        return FakeResponse()
+
+    try:
+        web_app.load_ai_settings = lambda: {  # type: ignore[assignment]
+            "api_key": "secret-key",
+            "model": "deepseek-v4-flash-vision-exp",
+            "base_url": "https://api.deepseek.com/chat/completions",
+        }
+        web_app.urllib.request.urlopen = fake_urlopen  # type: ignore[assignment]
+        result = web_app.call_deepseek_ai(
+            "Soft Striped Throw Blanket For Living Room",
+            "",
+            [image_path],
+            {
+                "categoryProductAttrList": [
+                    {
+                        "attrId": "material",
+                        "attributeNameAlias": "材质",
+                        "name": "Material",
+                        "values": [{"id": "polyester", "name": "Polyester"}],
+                    },
+                    {"attrId": "pattern", "attributeNameAlias": "图案", "name": "Pattern", "isCustomized": "true"},
+                ]
+            },
+        )
+    finally:
+        web_app.load_ai_settings, web_app.urllib.request.urlopen = originals
+
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
+    assert captured["body"]["model"] == "deepseek-v4-flash-vision-exp"
+    content = captured["body"]["messages"][0]["content"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert captured["auth"] == "Bearer secret-key"
+    assert result["description_html"] == long_description
+    assert result["attributes"] == [
+        {"attrId": "material", "valueId": "polyester", "valueName": "Polyester", "reason": ""},
+        {"attrId": "pattern", "valueId": "", "valueName": "Striped", "reason": ""},
+    ]
+
+
+def test_ai_description_policy_blocks_banned_words() -> None:
+    prompt = web_app.ai_suggestion_prompt("Soft throw blanket", "", {})
+    assert "kid、kids" in prompt
+    web_app.require_ai_description_policy("<p>A soft throw blanket for girls and teenagers.</p>")
+    for word in ["kid", "children", "baby", "teen", "pet"]:
+        try:
+            web_app.require_ai_description_policy(f"<p>A soft throw blanket for {word} rooms.</p>")
+        except RuntimeError as exc:
+            assert "禁用词" in str(exc)
+        else:
+            raise AssertionError(f"{word} should be banned")
+
+
+def test_upload_single_images_keeps_order() -> None:
+    original_put = web_app.put_oss_object
+    temp_root = Path(tempfile.mkdtemp())
+    files = []
+    for name in ["1.jpg", "2.jpg", "3.jpg"]:
+        path = temp_root / name
+        path.write_bytes(b"x")
+        files.append(path)
+    calls = []
+    try:
+        web_app.put_oss_object = lambda file_path, object_key: calls.append(object_key)  # type: ignore[assignment]
+        urls = web_app.upload_single_images(files, "single/test")
+    finally:
+        web_app.put_oss_object = original_put  # type: ignore[assignment]
+    assert urls == [
+        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/1.jpg",
+        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/2.jpg",
+        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/3.jpg",
+    ]
+    assert sorted(calls) == ["single/test/1.jpg", "single/test/2.jpg", "single/test/3.jpg"]
+
+
+def test_unified_single_image_upload_accepts_images_and_zip() -> None:
+    class FakeUpload:
+        def __init__(self, filename: str, data: bytes) -> None:
+            self.filename = filename
+            self.file = io.BytesIO(data)
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("10.jpg", b"10")
+        zf.writestr("Thumbs.db", b"ignored")
+
+    form = {
+        "image_upload": [
+            FakeUpload("2.jpg", b"2"),
+            FakeUpload("images.zip", archive.getvalue()),
+        ]
+    }
+
+    files = web_app.uploaded_image_files(form, Path(tempfile.mkdtemp()))  # type: ignore[arg-type]
+
+    assert [path.name for path in files] == ["001-2.jpg", "10.jpg"]
+
+
+def test_batch_folder_upload_preserves_sequence_folders() -> None:
+    class FakeUpload:
+        def __init__(self, filename: str, data: bytes) -> None:
+            self.filename = filename
+            self.file = io.BytesIO(data)
+
+    temp_root = Path(tempfile.mkdtemp())
+    upload_dir = temp_root / "upload"
+    image_root = upload_dir / "images"
+    form = {
+        "image_folder": [
+            FakeUpload("昆虫/1/2.jpg", b"one"),
+            FakeUpload("昆虫/1/Thumbs.db", b"ignored"),
+            FakeUpload("昆虫/2/1.png", b"two"),
+        ]
+    }
+
+    source_name, source_files = web_app.stage_batch_images(form, upload_dir, image_root)  # type: ignore[arg-type]
+    base, prefix = web_app.resolve_image_layout(image_root, "批次名", [1, 2], "")
+
+    assert source_name == "昆虫"
+    assert source_files == []
+    assert base == image_root / "昆虫"
+    assert prefix == "昆虫"
+    assert web_app.image_seq_dirs(base) == {1, 2}
+    assert (base / "1" / "2.jpg").read_bytes() == b"one"
+    assert not (base / "1" / "Thumbs.db").exists()
+
+
+def test_upload_single_video_uses_video_folder() -> None:
+    original_put = web_app.put_oss_object
+    temp_root = Path(tempfile.mkdtemp())
+    file_path = temp_root / "main video.mp4"
+    file_path.write_bytes(b"x")
+    calls = []
+    try:
+        web_app.put_oss_object = lambda uploaded_path, object_key: calls.append((uploaded_path, object_key))  # type: ignore[assignment]
+        url = web_app.upload_single_video(file_path, "single/test")
+    finally:
+        web_app.put_oss_object = original_put  # type: ignore[assignment]
+
+    assert calls == [(file_path, "single/test/video/main video.mp4")]
+    assert url == "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/video/main%20video.mp4"
+
+
+def test_single_form_renders_ai_suggestion_button() -> None:
+    originals = (
+        web_app.load_accounts_config,
+        web_app.get_tiktok_shops,
+        web_app.load_categories,
+        web_app.get_category_metadata,
+    )
+    try:
+        web_app.load_accounts_config = lambda: {  # type: ignore[assignment]
+            "accounts": {"acc": {"name": "测试账号", "app_key": "key", "app_secret": "secret"}}
+        }
+        web_app.get_tiktok_shops = lambda credentials: [{"shopId": 1, "shopName": "Test Shop"}]  # type: ignore[assignment]
+        web_app.load_categories = lambda credentials: [{"cid": "3", "path": "家纺 / 毛毯"}]  # type: ignore[assignment]
+        web_app.get_category_metadata = lambda cid, credentials, shop_ids: {  # type: ignore[assignment]
+            "categorySaleAttrList": [{"attrId": "size", "attributeNameAlias": "尺寸", "name": "Size"}],
+            "categoryProductAttrList": [{"attrId": "material", "name": "Material", "isCustomized": "true"}],
+        }
+        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+    finally:
+        (
+            web_app.load_accounts_config,
+            web_app.get_tiktok_shops,
+            web_app.load_categories,
+            web_app.get_category_metadata,
+        ) = originals
+
+    assert 'id="singleProductForm"' in html
+    assert 'name="ai_suggest_applied" value="0"' in html
+    assert "applied.value = '1'" in html
+    assert 'id="aiSuggestButton"' in html
+    assert "/single/ai-suggest" in html
+    assert "AI 已生成英文描述" in html
+
+
+def test_single_job_auto_ai_merges_description_and_attrs() -> None:
+    originals = (
+        web_app.upload_single_images,
+        web_app.call_deepseek_ai,
+        web_app.build_common_single_product,
+        web_app.claim_common_to_tiktok_single,
+        web_app.get_site_info,
+        web_app.get_default_warehouse_ids,
+        web_app.save_site_product,
+        web_app.claim_tiktok_to_shops,
+        web_app.miaoshou_post,
+        web_app.cleanup_created_single_product,
+    )
+    captured = {}
+    long_description = "<p>" + ("Soft striped throw blanket for home decor and everyday room styling. " * 18) + "</p>"
+    job_id = "job-ai-test"
+    web_app.JOBS[job_id] = {"status": "queued"}
+    try:
+        web_app.upload_single_images = lambda files, prefix: ["https://cdn.example/1.jpg"]  # type: ignore[assignment]
+
+        def fake_ai(title, notes, image_files, metadata):
+            captured["ai_notes"] = notes
+            return {
+                "description_html": long_description,
+                "attributes": [{"attrId": "material", "valueId": "polyester", "valueName": ""}],
+                "warnings": [],
+            }
+
+        def fake_create(item_num, credentials, title, notes, image_urls, skus, spec_name, weight, package_length, package_width, package_height, video_url=""):
+            captured["common_notes"] = notes
+            captured["common_video_url"] = video_url
+            return 11
+
+        def fake_save(detail_id, credentials, site_info, oss_md5, title, notes, image_urls, cid, product_attrs, sale_attr_id, spec_name, skus, shop_ids, weight, package_length, package_width, package_height, warehouse_ids=None, video_url=""):
+            captured["site_notes"] = notes
+            captured["product_attrs"] = product_attrs
+            captured["site_video_url"] = video_url
+
+        web_app.call_deepseek_ai = fake_ai  # type: ignore[assignment]
+        web_app.build_common_single_product = fake_create  # type: ignore[assignment]
+        web_app.claim_common_to_tiktok_single = lambda common_id, credentials: 22  # type: ignore[assignment]
+        web_app.get_site_info = lambda detail_id, credentials: ("md5", {})  # type: ignore[assignment]
+        web_app.get_default_warehouse_ids = lambda shop_ids, credentials: {}  # type: ignore[assignment]
+        web_app.save_site_product = fake_save  # type: ignore[assignment]
+        web_app.claim_tiktok_to_shops = lambda detail_id, shop_ids, credentials: None  # type: ignore[assignment]
+        web_app.miaoshou_post = lambda endpoint, body, credentials: {"result": "success", "code": "success", "data": {}}  # type: ignore[assignment]
+        web_app.cleanup_created_single_product = lambda common_id, detail_id, credentials: []  # type: ignore[assignment]
+
+        web_app.run_single_job(
+            job_id,
+            {
+                "credentials": ("key", "secret"),
+                "title": "Soft Striped Throw Blanket For Living Room",
+                "notes": "<p>Soft Striped Throw Blanket For Living Room</p>",
+                "notes_is_fallback": True,
+                "cid": 3,
+                "product_attrs": [],
+                "metadata": {
+                    "categoryProductAttrList": [
+                        {
+                            "attrId": "material",
+                            "attributeNameAlias": "材质",
+                            "name": "Material",
+                            "values": [{"id": "polyester", "name": "Polyester"}],
+                        }
+                    ]
+                },
+                "auto_ai": True,
+                "sale_attr_id": "size",
+                "spec_name": "Bedding Size",
+                "sku_rows": [{"value": "50x60inch", "price": 8.9, "stock": 100}],
+                "shop_ids": [1],
+                "weight": 0.39,
+                "package_length": 30,
+                "package_width": 20,
+                "package_height": 5,
+                "image_files": [Path(__file__)],
+                "video_file": None,
+                "image_prefix": "single/test",
+                "item_num": "SINGLE-1",
+            },
+        )
+    finally:
+        (
+            web_app.upload_single_images,
+            web_app.call_deepseek_ai,
+            web_app.build_common_single_product,
+            web_app.claim_common_to_tiktok_single,
+            web_app.get_site_info,
+            web_app.get_default_warehouse_ids,
+            web_app.save_site_product,
+            web_app.claim_tiktok_to_shops,
+            web_app.miaoshou_post,
+            web_app.cleanup_created_single_product,
+        ) = originals
+
+    assert captured["ai_notes"] == ""
+    assert captured["common_notes"] == long_description
+    assert captured["site_notes"] == long_description
+    assert captured["common_video_url"] == ""
+    assert captured["site_video_url"] == ""
+    assert captured["product_attrs"] == [
+        {
+            "attributeId": "material",
+            "attributeName": "Material",
+            "attributeNameAlias": "材质",
+            "attributeValues": [{"valueName": "Polyester", "valueId": "polyester"}],
+        }
+    ]
+    assert web_app.JOBS[job_id]["summary"]["ai"]["status"] == "success"
+    web_app.JOBS.pop(job_id, None)
+
+
 if __name__ == "__main__":
     test_zip_subset_is_used_as_source_of_truth()
     test_saved_account_form_can_edit_key_without_revealing_secret()
     test_discover_templates_uses_template_keywords_and_shop_id()
     test_confirm_page_does_not_render_secrets()
     test_status_labels_and_errors_are_user_friendly()
+    test_job_page_hides_oss_image_directory()
     test_home_uses_saved_miaoshou_accounts_without_web_user()
     test_batch_endpoints_are_declared()
     test_flatten_category_tree_keeps_leaf_paths_only()
@@ -593,4 +977,12 @@ if __name__ == "__main__":
     test_save_site_product_fills_shop_warehouse_stock_map()
     test_single_job_deletes_created_drafts_when_site_save_fails()
     test_single_form_shows_required_category_attrs_before_package_fields()
+    test_deepseek_ai_suggestion_uses_images_and_returns_clean_attrs()
+    test_ai_description_policy_blocks_banned_words()
+    test_upload_single_images_keeps_order()
+    test_unified_single_image_upload_accepts_images_and_zip()
+    test_batch_folder_upload_preserves_sequence_folders()
+    test_upload_single_video_uses_video_folder()
+    test_single_form_renders_ai_suggestion_button()
+    test_single_job_auto_ai_merges_description_and_attrs()
     print("ok")

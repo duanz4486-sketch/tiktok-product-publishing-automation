@@ -12,3 +12,6 @@ data/*.sqlite3-*
 deploy/
 tunnel.log
 tunnel*.log
+app.log
+app.err
+miaoshou-*.zip

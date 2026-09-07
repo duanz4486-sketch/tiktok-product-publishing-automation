@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, message="'cgi' is deprecated.*")
@@ -16,9 +17,11 @@ import re
 import secrets
 import threading
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,12 +39,24 @@ OSS_ENDPOINT = "oss-cn-shenzhen.aliyuncs.com"
 OSS_REGION = "cn-shenzhen"
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
-ACTIVE_STATUSES = {"queued", "uploading", "running"}
+ACTIVE_STATUSES = {"queued", "uploading", "ai_processing", "running"}
 PENDING_ACCOUNTS: dict[str, dict] = {}
 PENDING_ACCOUNTS_LOCK = threading.Lock()
 CATEGORY_CACHE: dict[str, list[dict]] = {}
 CATEGORY_CACHE_LOCK = threading.Lock()
 SINGLE_IMAGE_LIMIT = 9
+VALID_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm"}
+MIN_AI_DESCRIPTION_CHARS = 1000
+BANNED_AI_DESCRIPTION_PATTERNS = [
+    (re.compile(r"\bkids?\b", re.I), "kid/kids"),
+    (re.compile(r"\bchild(?:ren)?\b", re.I), "child/children"),
+    (re.compile(r"\bbab(?:y|ies)\b", re.I), "baby/babies"),
+    (re.compile(r"\binfants?\b", re.I), "infant/infants"),
+    (re.compile(r"\btoddlers?\b", re.I), "toddler/toddlers"),
+    (re.compile(r"\bnewborns?\b", re.I), "newborn/newborns"),
+    (re.compile(r"\bteens?\b", re.I), "teen/teens"),
+    (re.compile(r"\bpets?\b", re.I), "pet/pets"),
+]
 SITE = "US"
 DEFAULT_OPERATOR = "网页操作"
 
@@ -132,6 +147,16 @@ def save_upload(form: cgi.FieldStorage, name: str, target: Path) -> None:
             out.write(chunk)
 
 
+def safe_upload_relative_path(filename: object) -> Path | None:
+    raw = str(filename or "").replace("\\", "/").strip("/")
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"上传文件路径不安全: {filename}")
+    return path
+
+
 def extract_zip(zip_path: Path, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     target_root = target.resolve()
@@ -151,6 +176,40 @@ def extract_zip(zip_path: Path, target: Path) -> None:
             output.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as src, output.open("wb") as dst:
                 dst.write(src.read())
+
+
+def stage_batch_images(form: cgi.FieldStorage, upload_dir: Path, image_root: Path) -> tuple[str, list[tuple[Path, str]]]:
+    zip_fields = [field for field in field_list(form, "image_zip") if getattr(field, "filename", "")]
+    folder_fields = [field for field in field_list(form, "image_folder") if getattr(field, "filename", "")]
+
+    if zip_fields:
+        zip_path = upload_dir / "images.zip"
+        original_name = upload_filename(form, "image_zip", "images.zip")
+        save_uploaded_file(zip_fields[0], zip_path)
+        extract_zip(zip_path, image_root)
+        return original_name, [(zip_path, original_name)]
+
+    if not folder_fields:
+        raise ValueError("请上传图片 ZIP 或图片文件夹")
+
+    saved = 0
+    top_names: list[str] = []
+    for field in folder_fields:
+        rel = safe_upload_relative_path(getattr(field, "filename", ""))
+        if rel is None:
+            continue
+        if rel.name.lower() == "thumbs.db" or rel.suffix.lower() not in VALID_IMAGE_EXTS:
+            continue
+        if len(rel.parts) > 1 and rel.parts[0] not in top_names:
+            top_names.append(rel.parts[0])
+        save_uploaded_file(field, image_root / rel)
+        saved += 1
+
+    if not saved:
+        raise ValueError("图片文件夹里没有找到支持的图片文件")
+
+    source_name = top_names[0] if len(top_names) == 1 else "folder-upload"
+    return source_name, []
 
 
 def load_local_env() -> None:
@@ -286,6 +345,13 @@ def contains_cjk(value: str) -> bool:
 def require_english(value: str, label: str) -> None:
     if contains_cjk(value):
         raise ValueError(f"{label}需要填写英文，不能包含中文")
+
+
+def require_ai_description_policy(value: str) -> None:
+    text = re.sub(r"<[^>]+>", " ", value or "")
+    banned = [label for pattern, label in BANNED_AI_DESCRIPTION_PATTERNS if pattern.search(text)]
+    if banned:
+        raise RuntimeError("AI 英文详情描述包含禁用词：" + "、".join(banned))
 
 
 def account_credentials(account: dict) -> tuple[str, str]:
@@ -463,22 +529,31 @@ def save_uploaded_file(field: cgi.FieldStorage, target: Path) -> Path:
 def uploaded_image_files(form: cgi.FieldStorage, upload_dir: Path) -> list[Path]:
     staged: list[tuple[str, Path]] = []
     direct_dir = upload_dir / "direct-images"
-    for field in field_list(form, "image_files"):
-        filename = Path(str(getattr(field, "filename", "")).replace("\\", "/")).name
-        if not filename or Path(filename).suffix.lower() not in VALID_IMAGE_EXTS:
-            continue
-        target = direct_dir / f"{len(staged) + 1:03d}-{filename}"
-        staged.append((filename, save_uploaded_file(field, target)))
+    zip_index = 0
 
-    zip_field = form["image_zip"] if "image_zip" in form else None
-    if zip_field is not None and not isinstance(zip_field, list) and getattr(zip_field, "filename", ""):
-        zip_path = upload_dir / "single-images.zip"
-        save_uploaded_file(zip_field, zip_path)
-        unzip_dir = upload_dir / "single-images"
-        extract_zip(zip_path, unzip_dir)
-        for path in unzip_dir.rglob("*"):
-            if path.is_file() and path.suffix.lower() in VALID_IMAGE_EXTS:
-                staged.append((path.name, path))
+    def stage_field(field: cgi.FieldStorage) -> None:
+        nonlocal zip_index
+        filename = Path(str(getattr(field, "filename", "")).replace("\\", "/")).name
+        suffix = Path(filename).suffix.lower()
+        if not filename:
+            return
+        if suffix == ".zip":
+            zip_index += 1
+            zip_path = upload_dir / f"single-images-{zip_index}.zip"
+            save_uploaded_file(field, zip_path)
+            unzip_dir = upload_dir / f"single-images-{zip_index}"
+            extract_zip(zip_path, unzip_dir)
+            for path in unzip_dir.rglob("*"):
+                if path.is_file() and path.suffix.lower() in VALID_IMAGE_EXTS:
+                    staged.append((path.name, path))
+            return
+        if suffix in VALID_IMAGE_EXTS:
+            target = direct_dir / f"{len(staged) + 1:03d}-{filename}"
+            staged.append((filename, save_uploaded_file(field, target)))
+
+    for name in ("image_upload", "image_files", "image_zip"):
+        for field in field_list(form, name):
+            stage_field(field)
 
     staged = sorted(staged, key=lambda item: natural_key(item[0]))
     return [path for _, path in staged[:SINGLE_IMAGE_LIMIT]]
@@ -503,19 +578,53 @@ def uploaded_sku_image_files(form: cgi.FieldStorage, upload_dir: Path) -> dict[s
     return result
 
 
+def uploaded_video_file(form: cgi.FieldStorage, upload_dir: Path) -> Path | None:
+    field = form["main_video"] if "main_video" in form else None
+    if field is None or isinstance(field, list):
+        return None
+    filename = Path(str(getattr(field, "filename", "")).replace("\\", "/")).name
+    if not filename:
+        return None
+    if Path(filename).suffix.lower() not in VALID_VIDEO_EXTS:
+        raise ValueError(f"主图视频 {filename} 不是支持的视频格式")
+    return save_uploaded_file(field, upload_dir / "video" / filename)
+
+
 def upload_single_images(files: list[Path], object_prefix: str) -> list[str]:
-    urls: list[str] = []
-    for file_path in files:
+    def upload_one(file_path: Path) -> str:
         object_key = f"{object_prefix}/{file_path.name}"
         put_oss_object(file_path, object_key)
-        urls.append(f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}")
-    return urls
+        return f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
+
+    if len(files) <= 1:
+        return [upload_one(file_path) for file_path in files]
+    with ThreadPoolExecutor(max_workers=min(4, len(files))) as pool:
+        return list(pool.map(upload_one, files))
+
+
+def upload_single_video(file_path: Path | None, object_prefix: str) -> str:
+    if not file_path:
+        return ""
+    object_key = f"{object_prefix}/video/{file_path.name}"
+    put_oss_object(file_path, object_key)
+    return f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
 
 
 def load_ai_settings() -> dict:
+    load_local_env()
     if AI_SETTINGS_PATH.exists():
-        return json.loads(AI_SETTINGS_PATH.read_text(encoding="utf-8"))
-    return {"provider": "DeepSeek", "model": "DeepSeek-V4-Flash-Vision-Exp", "language": "zh-CN"}
+        settings = json.loads(AI_SETTINGS_PATH.read_text(encoding="utf-8"))
+    else:
+        settings = {}
+    settings.setdefault("provider", "DeepSeek")
+    settings.setdefault("model", "deepseek-v4-flash-vision-exp")
+    settings.setdefault("language", "zh-CN")
+    settings.setdefault("base_url", "https://api.deepseek.com/chat/completions")
+    if str(settings.get("model") or "").lower() == "deepseek-v4-flash-vision-exp":
+        settings["model"] = "deepseek-v4-flash-vision-exp"
+    if not settings.get("api_key"):
+        settings["api_key"] = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    return settings
 
 
 def save_ai_settings(settings: dict) -> None:
@@ -527,7 +636,175 @@ def save_ai_settings(settings: dict) -> None:
     AI_SETTINGS_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def build_common_single_product(item_num: str, credentials: tuple[str, str], title: str, notes: str, image_urls: list[str], skus: list[dict], spec_name: str, weight: float, package_length: float, package_width: float, package_height: float) -> int:
+def image_data_url(file_path: Path) -> str:
+    content_type = mimetypes.guess_type(file_path.name)[0] or "image/jpeg"
+    data = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    return f"data:{content_type};base64,{data}"
+
+
+def attr_prompt_rows(attrs: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for attr in attrs:
+        attr_id = str(attr.get("attrId") or "")
+        if not attr_id:
+            continue
+        rows.append(
+            {
+                "attrId": attr_id,
+                "label": attr_label(attr),
+                "required": is_required_attr(attr),
+                "options": [
+                    {
+                        "id": str(item.get("id") or ""),
+                        "name": str(item.get("name") or item.get("valueNameAlias") or ""),
+                    }
+                    for item in (attr.get("values") or [])[:80]
+                    if isinstance(item, dict)
+                ],
+                "customAllowed": truthy_flag(attr.get("isCustomized")) or not attr.get("values"),
+            }
+        )
+    return rows
+
+
+def ai_suggestion_prompt(title: str, notes: str, metadata: dict) -> str:
+    attrs = attr_prompt_rows(metadata_attrs(metadata, "categoryProductAttrList"))
+    return (
+        "你是跨境电商 TikTok 商品资料助手。页面提示用中文，但输出到妙手的内容必须是英文。\n"
+        "请根据用户标题、用户描述和产品图片生成可确认的商品建议。\n"
+        "严格规则：\n"
+        "1. 只能填写图片或标题/描述中能明确判断的信息；材质、防滑、机洗、克重、认证等不能确定就留空。\n"
+        "2. 不要编造品牌、认证、安全承诺、功能或材质。\n"
+        "3. description_html 严禁出现 kid、kids、child、children、baby、babies、infant、toddler、newborn、teen、teens、pet、pets；boy、girl、teenager、animal 可以使用。\n"
+        f"4. description_html 必须是英文 HTML；去掉 HTML 标签后至少 {MIN_AI_DESCRIPTION_CHARS} 个英文字符，分成 4-6 个 <p> 段落。\n"
+        "5. attributes 只返回能确定的属性。能匹配 options 时返回 valueId；不能匹配但允许自定义时返回英文 valueName。\n"
+        "6. 只返回 JSON，不要 Markdown，不要解释。\n\n"
+        "JSON 格式："
+        '{"description_html":"<p>English description</p>","attributes":[{"attrId":"...","valueId":"...","valueName":"...","reason":"中文依据"}],"warnings":["中文提醒"]}\n\n'
+        f"用户标题：{title}\n"
+        f"用户描述：{notes or '未填写'}\n"
+        "类目属性清单：\n"
+        f"{json.dumps(attrs[:80], ensure_ascii=False)}"
+    )
+
+
+def extract_json_object(text: str) -> dict:
+    content = text.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*", "", content)
+        content = re.sub(r"\s*```$", "", content)
+    start = content.find("{")
+    end = content.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("AI 没有返回可解析的 JSON")
+    return json.loads(content[start : end + 1])
+
+
+def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: dict) -> dict:
+    settings = load_ai_settings()
+    api_key = str(settings.get("api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("还没有配置 DeepSeek API Key，请先到 AI 设置页面保存。")
+    model = str(settings.get("model") or "deepseek-v4-flash-vision-exp").strip()
+    base_url = str(settings.get("base_url") or "https://api.deepseek.com/chat/completions").strip()
+    content: list[dict] = [{"type": "text", "text": ai_suggestion_prompt(title, notes, metadata)}]
+    for file_path in image_files[: min(3, SINGLE_IMAGE_LIMIT)]:
+        content.append({"type": "image_url", "image_url": {"url": image_data_url(file_path), "detail": "low"}})
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        base_url,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            payload = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"DeepSeek HTTP {exc.code}: {detail[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"DeepSeek 网络请求失败: {exc.reason}") from exc
+    data = json.loads(payload)
+    message = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if not message:
+        raise RuntimeError(f"DeepSeek 没有返回建议内容: {payload[:300]}")
+    suggestion = extract_json_object(message)
+    description = str(suggestion.get("description_html") or "").strip()
+    if description:
+        require_english(description, "AI 英文详情描述")
+        require_ai_description_policy(description)
+        if len(re.sub(r"<[^>]+>", " ", description)) < MIN_AI_DESCRIPTION_CHARS:
+            raise RuntimeError(f"AI 英文详情描述少于 {MIN_AI_DESCRIPTION_CHARS} 字符，请重新生成。")
+    cleaned_attrs: list[dict] = []
+    known_attrs = {str(attr.get("attrId") or ""): attr for attr in metadata_attrs(metadata, "categoryProductAttrList")}
+    for item in suggestion.get("attributes") or []:
+        if not isinstance(item, dict):
+            continue
+        attr_id = str(item.get("attrId") or "").strip()
+        if attr_id not in known_attrs:
+            continue
+        value_id = str(item.get("valueId") or "").strip()
+        value_name = str(item.get("valueName") or "").strip()
+        if not value_id and value_name:
+            require_english(value_name, attr_label(known_attrs[attr_id]))
+        if value_id or value_name:
+            cleaned_attrs.append(
+                {
+                    "attrId": attr_id,
+                    "valueId": value_id,
+                    "valueName": value_name,
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+    return {
+        "description_html": description,
+        "attributes": cleaned_attrs,
+        "warnings": [str(item) for item in (suggestion.get("warnings") or []) if str(item).strip()],
+    }
+
+
+def ai_configured() -> bool:
+    return bool(str(load_ai_settings().get("api_key") or "").strip())
+
+
+def merge_ai_attributes(product_attrs: list[dict], suggestion_attrs: list[dict], metadata: dict) -> list[dict]:
+    result = list(product_attrs)
+    existing_ids = {str(item.get("attributeId") or "") for item in result}
+    metadata_by_id = {str(attr.get("attrId") or ""): attr for attr in metadata_attrs(metadata, "categoryProductAttrList")}
+    for item in suggestion_attrs:
+        attr_id = str(item.get("attrId") or "").strip()
+        if not attr_id or attr_id in existing_ids or attr_id not in metadata_by_id:
+            continue
+        attr = metadata_by_id[attr_id]
+        value_id = str(item.get("valueId") or "").strip()
+        value_name = str(item.get("valueName") or "").strip()
+        if value_id:
+            for option in attr.get("values") or []:
+                if str(option.get("id") or "") == value_id:
+                    value_name = str(option.get("name") or option.get("valueNameAlias") or value_name or value_id)
+                    break
+        if not value_name:
+            continue
+        require_english(value_name, attr_label(attr))
+        result.append(
+            {
+                "attributeId": attr_id,
+                "attributeName": str(attr.get("name") or attr.get("attributeName") or ""),
+                "attributeNameAlias": str(attr.get("attributeNameAlias") or ""),
+                "attributeValues": [{"valueName": value_name, "valueId": value_id}],
+            }
+        )
+        existing_ids.add(attr_id)
+    return result
+
+
+def build_common_single_product(item_num: str, credentials: tuple[str, str], title: str, notes: str, image_urls: list[str], skus: list[dict], spec_name: str, weight: float, package_length: float, package_width: float, package_height: float, video_url: str = "") -> int:
     first_sku = skus[0]
     color_map = {
         sku["value_id"]: {"name": sku["value"], "imgUrl": sku["image_url"], "imgUrls": [sku["image_url"]]}
@@ -547,9 +824,7 @@ def build_common_single_product(item_num: str, credentials: tuple[str, str], tit
         }
         for sku in skus
     }
-    response = miaoshou_post(
-        "create_common_collect_product",
-        {
+    body = {
             "title": title,
             "itemNum": item_num,
             "notesText": re.sub(r"<[^>]+>", " ", notes)[:65536],
@@ -565,9 +840,10 @@ def build_common_single_product(item_num: str, credentials: tuple[str, str], tit
             "colorPropName": spec_name,
             "colorMap": color_map,
             "skuMap": sku_map,
-        },
-        credentials,
-    )
+        }
+    if video_url:
+        body["mainImgVideoUrl"] = video_url
+    response = miaoshou_post("create_common_collect_product", body, credentials)
     data = expect_miaoshou_success(response, "创建公共采集箱产品")
     return int(data["commonCollectBoxDetailId"])
 
@@ -618,7 +894,7 @@ def get_site_info(detail_id: int, credentials: tuple[str, str]) -> tuple[str, di
     return str(data.get("ossMd5") or ""), data.get("siteCollectItemInfo") or {}
 
 
-def save_site_product(detail_id: int, credentials: tuple[str, str], site_info: dict, oss_md5: str, title: str, notes: str, image_urls: list[str], cid: int, product_attrs: list[dict], sale_attr_id: str, spec_name: str, skus: list[dict], shop_ids: list[int], weight: float, package_length: float, package_width: float, package_height: float, warehouse_ids: dict[str, str] | None = None) -> None:
+def save_site_product(detail_id: int, credentials: tuple[str, str], site_info: dict, oss_md5: str, title: str, notes: str, image_urls: list[str], cid: int, product_attrs: list[dict], sale_attr_id: str, spec_name: str, skus: list[dict], shop_ids: list[int], weight: float, package_length: float, package_width: float, package_height: float, warehouse_ids: dict[str, str] | None = None, video_url: str = "") -> None:
     if not oss_md5:
         raise RuntimeError("TikTok 站点详情缺少 ossMd5")
     warehouse_ids = warehouse_ids or {}
@@ -676,6 +952,8 @@ def save_site_product(detail_id: int, credentials: tuple[str, str], site_info: d
             "collectBoxDetailShopList": [{"shopId": shop_id, "site": SITE} for shop_id in shop_ids],
         }
     )
+    if video_url:
+        info["mainImgVideoUrl"] = video_url
     response = miaoshou_post(
         "save_tk_site_collect_item_info",
         {"ossMd5": oss_md5, "site": SITE, "detailId": detail_id, "siteCollectItemInfo": info},
@@ -789,18 +1067,43 @@ def run_single_job(job_id: str, params: dict) -> None:
     try:
         set_job(job_id, status="uploading")
         image_urls = upload_single_images(params["image_files"], params["image_prefix"])
+        video_url = upload_single_video(params.get("video_file"), params["image_prefix"])
         for row in params["sku_rows"]:
             sku_image_path = row.get("image_path")
             if sku_image_path:
                 row["image_url"] = upload_single_images([sku_image_path], f"{params['image_prefix']}/sku")[0]
         set_job(job_id, uploaded_count=len(image_urls))
         skus = resolve_skus(params["sku_rows"], image_urls, params["weight"])
+        notes = params["notes"]
+        product_attrs = list(params["product_attrs"])
+        ai_status: dict[str, object] = {"status": "skipped", "reason": "未配置 DeepSeek API Key"}
+        if params.get("auto_ai"):
+            set_job(job_id, status="ai_processing")
+            try:
+                suggestion = call_deepseek_ai(
+                    params["title"],
+                    "" if params.get("notes_is_fallback") else notes,
+                    params["image_files"],
+                    params["metadata"],
+                )
+                if params.get("notes_is_fallback") and suggestion.get("description_html"):
+                    notes = str(suggestion["description_html"])
+                product_attrs = merge_ai_attributes(product_attrs, suggestion.get("attributes") or [], params["metadata"])
+                ai_status = {
+                    "status": "success",
+                    "description": "已生成" if not params.get("notes_is_fallback") else ("已采用" if notes != params["notes"] else "未采用"),
+                    "attributeCount": len(suggestion.get("attributes") or []),
+                    "warnings": suggestion.get("warnings") or [],
+                }
+            except Exception as exc:
+                ai_status = {"status": "failed", "error": readable_error_text(exc) or repr(exc)}
+        result["ai"] = ai_status
         set_job(job_id, status="running")
         common_id = build_common_single_product(
             params["item_num"],
             params["credentials"],
             params["title"],
-            params["notes"],
+            notes,
             image_urls,
             skus,
             params["spec_name"],
@@ -808,6 +1111,7 @@ def run_single_job(job_id: str, params: dict) -> None:
             params["package_length"],
             params["package_width"],
             params["package_height"],
+            video_url,
         )
         detail_id = claim_common_to_tiktok_single(common_id, params["credentials"])
         oss_md5, site_info = get_site_info(detail_id, params["credentials"])
@@ -818,10 +1122,10 @@ def run_single_job(job_id: str, params: dict) -> None:
             site_info,
             oss_md5,
             params["title"],
-            params["notes"],
+            notes,
             image_urls,
             params["cid"],
-            params["product_attrs"],
+            product_attrs,
             params["sale_attr_id"],
             params["spec_name"],
             skus,
@@ -831,6 +1135,7 @@ def run_single_job(job_id: str, params: dict) -> None:
             params["package_width"],
             params["package_height"],
             warehouse_ids,
+            video_url,
         )
         claim_tiktok_to_shops(detail_id, params["shop_ids"], params["credentials"])
         shop_results = []
@@ -979,6 +1284,7 @@ def progress_html(job: dict) -> str:
 STATUS_LABELS = {
     "queued": "排队中",
     "uploading": "上传图片",
+    "ai_processing": "AI识别中",
     "running": "处理中",
     "started": "已开始",
     "done": "已完成",
@@ -1014,6 +1320,12 @@ def readable_error_text(error: object) -> str:
         return "OSS 上传权限失败：检查 AccessKey、Bucket 权限和地区配置。"
     if "appNotFound" in text:
         return "妙手应用不存在或未启用：检查 App Key/App Secret 是否对应当前妙手账号。"
+    if "DeepSeek HTTP 401" in text or "DeepSeek HTTP 403" in text:
+        return "DeepSeek 认证失败：检查 AI 设置里的 API Key 是否正确、是否有权限调用视觉模型。"
+    if "DeepSeek HTTP 400" in text:
+        return "DeepSeek 请求参数失败：检查模型是否支持图片识别，建议使用 deepseek-v4-flash-vision-exp。"
+    if "DeepSeek 网络请求失败" in text:
+        return "DeepSeek 网络请求失败：检查服务器是否能访问 DeepSeek API。"
     if "create_common_collect_product" in text:
         return "妙手创建公共采集箱产品接口失败：检查接口权限和妙手接口文档路径。"
     if "查询 TikTok 详情失败" in text:
@@ -1031,6 +1343,22 @@ def readable_job_error(job: dict) -> str:
         if item.get("status") == "failed" and item.get("error"):
             return readable_error_text(item.get("error"))
     return ""
+
+
+def ai_status_text(item: dict) -> str:
+    ai = item.get("ai") or {}
+    if not isinstance(ai, dict):
+        return ""
+    status = str(ai.get("status") or "")
+    if status == "success":
+        count = int(ai.get("attributeCount") or 0)
+        desc = str(ai.get("description") or "")
+        return f"成功，属性建议 {count} 个，描述{desc}"
+    if status == "failed":
+        return "失败：" + readable_error_text(ai.get("error"))
+    if status == "skipped":
+        return "未启用：" + str(ai.get("reason") or "")
+    return status
 
 
 def job_count_text(job: dict) -> str:
@@ -1470,6 +1798,12 @@ def render_page(title: str, body: str, refresh: bool = False, header_right: str 
     .danger:hover:not(:disabled) {{ background: #ffe1dd; box-shadow: none; }}
     .form-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; }}
     .field-card {{ padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }}
+    .upload-choice-row {{ display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 8px; }}
+    .upload-actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }}
+    .upload-button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; }}
+    .upload-button:hover {{ border-color: var(--accent); color: var(--accent); }}
+    .file-choice-name {{ color: var(--text-soft); font-size: 13px; }}
+    .hidden-file {{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }}
     .check-row {{ display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }}
     .check-row input {{ width: 18px; min-height: 18px; margin-top: 2px; flex: 0 0 auto; }}
     .check-row label {{ margin: 0; color: var(--text); }}
@@ -1875,19 +2209,20 @@ def render_home(username: str) -> bytes:
         <p class="field-help">固定参数来自已保存的妙手模板。</p>
       </div>
       <div class="field-card">
-        <label for="image_prefix">OSS 图片目录</label>
-        <input id="image_prefix" name="image_prefix" placeholder="可不填；ZIP 顶层是图片目录时自动识别">
-        <p class="field-help">同路径文件会以本次上传内容为准。</p>
-      </div>
-      <div class="field-card">
         <label for="title_file">标题 Excel</label>
         <input id="title_file" name="title_file" type="file" accept=".xlsx,.xlsm" required>
         <p class="field-help">优先按表头识别“序号”和“标题”。</p>
       </div>
       <div class="field-card">
-        <label for="image_zip">图片 ZIP</label>
-        <input id="image_zip" name="image_zip" type="file" accept=".zip" required>
-        <p class="field-help">ZIP 子文件夹名要和 Excel 序号对应。</p>
+        <label>图片来源</label>
+        <div class="upload-choice-row">
+          <label class="upload-button" for="batch_image_zip">选择图片 ZIP</label>
+          <label class="upload-button" for="batch_image_folder">选择图片文件夹</label>
+          <span id="batchImageChoice" class="file-choice-name">未选择任何文件</span>
+        </div>
+        <input class="hidden-file" id="batch_image_zip" name="image_zip" type="file" accept=".zip">
+        <input class="hidden-file" id="batch_image_folder" name="image_folder" type="file" accept="image/*" multiple webkitdirectory directory>
+        <p class="field-help">支持 ZIP 或大文件夹；子文件夹名要和 Excel 序号对应。</p>
       </div>
       <div class="field-card">
         <label for="limit">只处理前几个产品</label>
@@ -1908,7 +2243,7 @@ def render_home(username: str) -> bytes:
           <p class="field-help">首次测试建议保留勾选，确认匹配后再正式创建。</p>
         </div>
       </div>
-      <div class="alert alert-info wide">以本次上传的 Excel 和图片 ZIP 为准；匹配只看 Excel 的序号列和 ZIP 子文件夹名字。两边都有的序号会处理，缺标题或缺图片的序号会记为失败。勾选自动上传后，程序会用本次 Excel、ZIP 和 ZIP 图片上传并覆盖 OSS 同路径旧文件。</div>
+      <div class="alert alert-info wide">以本次上传的 Excel 和图片来源为准；匹配只看 Excel 的序号列和图片子文件夹名字。两边都有的序号会处理，缺标题或缺图片的序号会记为失败。勾选自动上传后，程序会用本次图片上传并覆盖 OSS 同路径旧文件。</div>
     </div>
     <div class="actions"><button id="batchSubmit" type="submit" data-working-label="正在创建任务..." {disabled}>{'当前账号处理中' if locked else '开始处理'}</button></div>
     </fieldset>
@@ -1921,6 +2256,28 @@ def render_home(username: str) -> bytes:
       const account = document.getElementById('account_id');
       const submit = document.getElementById('batchSubmit');
       const message = document.getElementById('accountBusyMessage');
+      const imageZip = document.getElementById('batch_image_zip');
+      const imageFolder = document.getElementById('batch_image_folder');
+      const imageChoice = document.getElementById('batchImageChoice');
+      function setImageChoice(input, otherInput, label) {{
+        if (!input || !input.files || !input.files.length) return;
+        if (otherInput) otherInput.value = '';
+        if (imageChoice) {{
+          const count = input.files.length;
+          imageChoice.textContent = count === 1 ? input.files[0].name : `${{label}}，共 ${{count}} 个图片文件`;
+        }}
+      }}
+      if (imageZip) imageZip.addEventListener('change', () => setImageChoice(imageZip, imageFolder, '已选择 ZIP'));
+      if (imageFolder) imageFolder.addEventListener('change', () => setImageChoice(imageFolder, imageZip, '已选择文件夹'));
+      form.addEventListener('submit', (event) => {{
+        const hasZip = imageZip && imageZip.files && imageZip.files.length;
+        const hasFolder = imageFolder && imageFolder.files && imageFolder.files.length;
+        if (!hasZip && !hasFolder) {{
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          alert('请选择图片 ZIP 或图片文件夹');
+        }}
+      }});
       function updateBatchSubmit() {{
         const busy = account && activeAccounts.has(account.value);
         if (submit) {{
@@ -1965,12 +2322,13 @@ def render_job(job_id: str, username: str | None = None) -> bytes:
           <td>{'复用旧产品' if item.get("reused_existing") or item.get("reused_from_log") else '新建' if item.get("status") == "success" else ''}</td>
           <td>{e(item.get("image_count"))}</td>
           <td>{e(item.get("tiktokDetailId"))}</td>
+          <td>{e(ai_status_text(item))}</td>
           <td class="error-cell">{e(readable_error_text(item.get("error")))}</td>
         </tr>"""
         for item in job.get("results", [])
     )
     if not rows:
-        rows = '<tr><td colspan="6" class="empty-row">等待开始</td></tr>'
+        rows = '<tr><td colspan="7" class="empty-row">等待开始</td></tr>'
     body = f"""
 {render_top_nav("batch")}
 <section>
@@ -1981,7 +2339,7 @@ def render_job(job_id: str, username: str | None = None) -> bytes:
     </div>
     <div>{status_badge(job.get("status"))}</div>
   </div>
-  <p class="hint">OSS 图片目录：{e(job.get("image_prefix"))}　已处理：{e(job.get("done_count", 0))}</p>
+  <p class="hint">已处理：{e(job.get("done_count", 0))}</p>
   {progress_html(job)}
   <div class="alert alert-info">预检失败序号：{e("、".join(str(seq) for seq in job.get("preflight_failed_seqs", [])[:30]) or "无")}<br>日志：{e(job.get("log_path") or summary.get("logPath") or "任务完成后生成")}</div>
   {f'<div class="alert alert-error">{e(readable_job_error(job))}</div>' if readable_job_error(job) else ''}
@@ -1996,7 +2354,7 @@ def render_job(job_id: str, username: str | None = None) -> bytes:
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>序号</th><th>状态</th><th>处理方式</th><th>图片数</th><th>TikTok ID</th><th>失败原因</th></tr></thead>
+      <thead><tr><th>序号</th><th>状态</th><th>处理方式</th><th>图片数</th><th>TikTok ID</th><th>AI状态</th><th>失败原因</th></tr></thead>
       <tbody>{rows}</tbody>
     </table>
   </div>
@@ -2235,9 +2593,10 @@ def render_single(username: str, query: dict[str, list[str]] | None = None, erro
     product_form = ""
     if cid_text and metadata:
         product_form = f"""
-<form action="/single/create" method="post" enctype="multipart/form-data" data-submit-lock>
+<form id="singleProductForm" action="/single/create" method="post" enctype="multipart/form-data" data-submit-lock>
   <input type="hidden" name="account_id" value="{e(selected_account_id)}">
   <input type="hidden" name="cid" value="{e(cid_text)}">
+  <input type="hidden" id="ai_suggest_applied" name="ai_suggest_applied" value="0">
   <section>
     <h2>产品基础信息</h2>
     <p class="section-kicker">先填写页面上最核心的信息；类目属性、规格价格、物流包装会在后面分段填写。</p>
@@ -2252,30 +2611,37 @@ def render_single(username: str, query: dict[str, list[str]] | None = None, erro
         <textarea id="notes" name="notes" maxlength="10000" placeholder="不填时用标题生成一段英文描述"></textarea>
         <p class="field-help">不填写时会用标题生成基础英文描述。</p>
       </div>
+      <div class="alert alert-info wide" id="aiSuggestStatus">
+        AI 可以读取标题和前几张产品图片，生成英文描述并尝试填写有明确依据的类目属性；不确定的软参数会保持空白。
+      </div>
       <div class="field-card">
         <label for="item_num">产品编号</label>
         <input id="item_num" name="item_num" maxlength="50" placeholder="可不填">
-      </div>
-      <div class="field-card">
-        <label for="single_prefix">OSS 图片目录</label>
-        <input id="single_prefix" name="image_prefix" placeholder="留空用标题生成目录">
       </div>
     </div>
   </section>
   <section>
     <h2>产品图片</h2>
     <div class="form-grid">
-      <div class="field-card">
-        <label for="image_files">图片文件夹或多张图片</label>
-        <input id="image_files" name="image_files" type="file" accept="image/*" multiple webkitdirectory directory>
-        <p class="field-help">适合从桌面直接选择一个图片文件夹。</p>
+      <div class="field-card wide">
+        <label>产品图片</label>
+        <div class="upload-actions">
+          <label class="upload-button" for="image_upload_files">选择图片或 ZIP</label>
+          <label class="upload-button" for="image_upload_folder">选择图片文件夹</label>
+        </div>
+        <input class="hidden-file" id="image_upload_files" name="image_upload" type="file" accept="image/*,.zip" multiple>
+        <input class="hidden-file" id="image_upload_folder" name="image_upload" type="file" accept="image/*" multiple webkitdirectory directory>
+        <p class="field-help">同一个上传区支持单张图片、多张图片、图片文件夹或图片 ZIP。</p>
       </div>
       <div class="field-card">
-        <label for="image_zip">图片 ZIP</label>
-        <input id="image_zip" name="image_zip" type="file" accept=".zip">
-        <p class="field-help">也可以上传一个已经打包好的图片 ZIP。</p>
+        <label for="main_video">主图视频</label>
+        <input id="main_video" name="main_video" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm">
+        <p class="field-help">可选，只用于单产品智能上传。</p>
       </div>
       <div class="alert alert-info wide">按文件名自然排序，只保存上传前 {SINGLE_IMAGE_LIMIT} 张；少于 {SINGLE_IMAGE_LIMIT} 张不会报错。</div>
+    </div>
+    <div class="actions">
+      <button id="aiSuggestButton" type="button" class="ghost" data-working-label="AI 正在识别图片...">AI 生成描述和属性建议</button>
     </div>
   </section>
   <section>
@@ -2368,6 +2734,83 @@ function removeSkuRow(button) {{
   const box = document.getElementById('skuRows');
   if (box.children.length > 1) button.parentElement.remove();
 }}
+const singleForm = document.getElementById('singleProductForm');
+const aiButton = document.getElementById('aiSuggestButton');
+const aiStatus = document.getElementById('aiSuggestStatus');
+function setAiStatus(message, kind = 'info') {{
+  if (!aiStatus) return;
+  aiStatus.className = 'alert alert-' + kind + ' wide';
+  aiStatus.textContent = message;
+}}
+function findOptionByText(select, valueName) {{
+  const target = String(valueName || '').trim().toLowerCase();
+  if (!target) return '';
+  for (const option of select.options) {{
+    const text = option.textContent.trim().toLowerCase();
+    if (text === target || text.includes(target) || target.includes(text.split('/')[0].trim())) {{
+      return option.value;
+    }}
+  }}
+  return '';
+}}
+function applyAiSuggestion(suggestion) {{
+  if (!suggestion) return;
+  const notes = document.getElementById('notes');
+  if (notes && suggestion.description_html) notes.value = suggestion.description_html;
+  let filled = 0;
+  for (const attr of (suggestion.attributes || [])) {{
+    const attrId = attr.attrId;
+    const select = singleForm.querySelector(`[name="attr_${{CSS.escape(attrId)}}"]`);
+    const custom = singleForm.querySelector(`[name="attr_custom_${{CSS.escape(attrId)}}"]`);
+    if (select) {{
+      const optionValue = attr.valueId || findOptionByText(select, attr.valueName);
+      if (optionValue) {{
+        select.value = optionValue;
+        filled += 1;
+        continue;
+      }}
+    }}
+    if (custom && attr.valueName) {{
+      custom.value = attr.valueName;
+      filled += 1;
+    }}
+  }}
+  const warnings = (suggestion.warnings || []).filter(Boolean);
+  const suffix = warnings.length ? ' 提醒：' + warnings.join('；') : '';
+  const applied = document.getElementById('ai_suggest_applied');
+  if (applied) applied.value = '1';
+  setAiStatus(`AI 已生成英文描述，并填入 ${{filled}} 个可识别属性。${{suffix}}`, 'success');
+}}
+if (singleForm && aiButton) {{
+  aiButton.addEventListener('click', async () => {{
+    const title = document.getElementById('title');
+    const imageInputs = Array.from(singleForm.querySelectorAll('input[name="image_upload"]'));
+    if (!title || !title.value.trim()) {{
+      setAiStatus('请先填写英文标题，再让 AI 生成建议。', 'error');
+      return;
+    }}
+    const hasImages = imageInputs.some(input => input.files && input.files.length);
+    if (!hasImages) {{
+      setAiStatus('请先上传产品图片文件夹、多张图片或图片 ZIP，AI 才能识别。', 'error');
+      return;
+    }}
+    aiButton.disabled = true;
+    const oldText = aiButton.textContent;
+    aiButton.textContent = aiButton.dataset.workingLabel || '处理中...';
+    setAiStatus('AI 正在读取标题和图片，请稍等。', 'info');
+    try {{
+      const response = await fetch('/single/ai-suggest', {{ method: 'POST', body: new FormData(singleForm) }});
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.error || 'AI 生成失败');
+      applyAiSuggestion(payload.suggestion);
+    }} catch (error) {{
+      setAiStatus(error.message || String(error), 'error');
+    }} finally {{
+      aiButton.disabled = false;
+      aiButton.textContent = oldText;
+    }}
+  }});
+}}
 </script>"""
 
     body = f"{render_top_nav('single')}{metadata_form}{product_form}"
@@ -2398,8 +2841,13 @@ def render_ai_settings(username: str, message: str = "", error: str = "") -> byt
       </div>
       <div class="field-card">
         <label for="model">视觉模型</label>
-        <input id="model" name="model" value="{e(settings.get("model", "DeepSeek-V4-Flash-Vision-Exp"))}">
+        <input id="model" name="model" value="{e(settings.get("model", "deepseek-v4-flash-vision-exp"))}">
         <p class="field-help">需要支持图片识别，不能只用纯文本模型。</p>
+      </div>
+      <div class="field-card wide">
+        <label for="base_url">接口地址</label>
+        <input id="base_url" name="base_url" value="{e(settings.get("base_url", "https://api.deepseek.com/chat/completions"))}">
+        <p class="field-help">默认使用 DeepSeek OpenAI 兼容的 Chat Completions 地址。</p>
       </div>
       <div class="field-card wide">
         <label for="api_key">API Key</label>
@@ -2446,6 +2894,14 @@ class Handler(BaseHTTPRequestHandler):
     def send_html(self, content: bytes, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def send_json(self, payload: dict, status: int = 200) -> None:
+        content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -2499,7 +2955,8 @@ class Handler(BaseHTTPRequestHandler):
                 save_ai_settings(
                     {
                         "provider": field_text(form, "provider", "DeepSeek"),
-                        "model": field_text(form, "model", "DeepSeek-V4-Flash-Vision-Exp"),
+                        "model": field_text(form, "model", "deepseek-v4-flash-vision-exp"),
+                        "base_url": field_text(form, "base_url", "https://api.deepseek.com/chat/completions"),
                         "language": "zh-CN",
                         "api_key": field_text(form, "api_key"),
                     }
@@ -2507,6 +2964,38 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect("/ai-settings?message=" + urllib.parse.quote("AI 设置已保存"))
             except Exception as exc:
                 self.redirect("/ai-settings?error=" + urllib.parse.quote(str(exc)))
+            return
+        if path == "/single/ai-suggest":
+            try:
+                form = cgi.FieldStorage(
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
+                )
+                config = load_accounts_config()
+                account_id = field_text(form, "account_id")
+                account = (config.get("accounts") or {}).get(account_id)
+                if not account:
+                    raise ValueError("请先选择有效的妙手账号")
+                credentials = account_credentials(account)
+                title = field_text(form, "title")
+                if not title:
+                    raise ValueError("请先填写英文标题")
+                require_english(title, "英文标题")
+                notes = field_text(form, "notes")
+                if notes:
+                    require_english(notes, "英文详情描述")
+                cid = int_field(form, "cid", "类目 ID", 1)
+                shop_ids = [int(str(item.value)) for item in field_list(form, "shop_id") if str(item.value or "").isdigit()]
+                metadata = get_category_metadata(cid, credentials, shop_ids[:3] if shop_ids else None)
+                upload_dir = UPLOAD_ROOT / ("ai-" + datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8])
+                image_files = uploaded_image_files(form, upload_dir)
+                if not image_files:
+                    raise ValueError("请先上传产品图片，AI 需要图片才能识别软参数")
+                suggestion = call_deepseek_ai(title, notes, image_files, metadata)
+                self.send_json({"ok": True, "suggestion": suggestion})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": readable_error_text(exc) or str(exc)}, 400)
             return
         if path == "/single/create":
             username = DEFAULT_OPERATOR
@@ -2538,10 +3027,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("英文标题长度必须在 25-255 字符")
                 require_english(title, "英文标题")
                 notes = field_text(form, "notes")
+                notes_is_fallback = False
                 if notes:
                     require_english(notes, "英文详情描述")
                 else:
                     notes = f"<p>{html.escape(title)}</p>"
+                    notes_is_fallback = True
+                ai_suggest_applied = field_text(form, "ai_suggest_applied") == "1"
                 weight = decimal_field(form, "weight", "重量", 0.001, 100)
                 package_length = decimal_field(form, "package_length", "包装长度", 1, 1000)
                 package_width = decimal_field(form, "package_width", "包装宽度", 1, 1000)
@@ -2559,6 +3051,7 @@ class Handler(BaseHTTPRequestHandler):
                 image_files = uploaded_image_files(form, upload_dir)
                 if not image_files:
                     raise ValueError("请上传产品图片文件夹、多张图片或图片 ZIP")
+                video_file = uploaded_video_file(form, upload_dir)
                 image_prefix = clean_prefix(field_text(form, "image_prefix"))
                 if not image_prefix:
                     title_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-")[:80] or "single-product"
@@ -2589,8 +3082,11 @@ class Handler(BaseHTTPRequestHandler):
                         "credentials": credentials,
                         "title": title,
                         "notes": notes,
+                        "notes_is_fallback": notes_is_fallback,
                         "cid": cid,
                         "product_attrs": product_attrs,
+                        "metadata": metadata,
+                        "auto_ai": ai_configured() and not ai_suggest_applied,
                         "sale_attr_id": sale_attr_id,
                         "spec_name": spec_name,
                         "sku_rows": sku_rows,
@@ -2600,6 +3096,7 @@ class Handler(BaseHTTPRequestHandler):
                         "package_width": package_width,
                         "package_height": package_height,
                         "image_files": image_files,
+                        "video_file": video_file,
                         "image_prefix": image_prefix,
                         "item_num": item_num,
                     },
@@ -2782,13 +3279,10 @@ class Handler(BaseHTTPRequestHandler):
             job_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
             upload_dir = UPLOAD_ROOT / job_id
             title_path = upload_dir / "title.xlsx"
-            zip_path = upload_dir / "images.zip"
             image_root = upload_dir / "images"
             title_original_name = upload_filename(form, "title_file", "title.xlsx")
-            zip_original_name = upload_filename(form, "image_zip", "images.zip")
             save_upload(form, "title_file", title_path)
-            save_upload(form, "image_zip", zip_path)
-            extract_zip(zip_path, image_root)
+            _, image_source_files = stage_batch_images(form, upload_dir, image_root)
             items = read_items(title_path)
             if limit:
                 items = items[:limit]
@@ -2800,7 +3294,7 @@ class Handler(BaseHTTPRequestHandler):
             process_seqs = [int(item["seq"]) for item in items]
             if not items and not preflight_failures:
                 found_text = "、".join(str(seq) for seq in sorted(image_seqs)[:30]) or "没有找到序号文件夹"
-                raise ValueError(f"本次 ZIP 里没有任何能和 Excel 序号对应的图片文件夹。当前识别到的图片序号是：{found_text}")
+                raise ValueError(f"本次图片来源里没有任何能和 Excel 序号对应的图片文件夹。当前识别到的图片序号是：{found_text}")
             total_count = len(items) + len(preflight_failures)
 
             with JOBS_LOCK:
@@ -2840,7 +3334,7 @@ class Handler(BaseHTTPRequestHandler):
                 "upload_to_oss": upload_to_oss,
                 "seqs": process_seqs,
                 "only_seqs": process_seqs,
-                "source_files": [(title_path, title_original_name), (zip_path, zip_original_name)],
+                "source_files": [(title_path, title_original_name), *image_source_files],
                 "preflight_failures": preflight_failures,
                 "reuse_existing": False,
                 "log_dir": RUN_ROOT,
