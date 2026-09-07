@@ -29,9 +29,18 @@ DEFAULT_TEMPLATE = "大地毯"
 ENDPOINTS = {
     "create_common_collect_product": "/open/v1/product/common_collect_box/common_collect_box/add_common_collect_box_detail",
     "claim_common_products_to_platform": "/open/v1/product/common_collect_box/common_collect_box/claimed",
+    "delete_common_collect_products": "/open/v1/product/common_collect_box/common_collect_box/batch_delete_common_collect_box_detail",
+    "get_shop_list": "/open/v1/product/shop/shop/get_shop_list",
+    "get_shop_warehouse_list": "/open/v1/product/collect_box/tiktok/collect_box/get_shop_warehouse_list",
+    "get_tk_category_tree": "/open/v1/product/collect_box/tiktok/collect_box/get_category_tree_by_site",
+    "get_tk_category_metadata": "/open/v1/product/collect_box/tiktok/collect_box/get_category_metadata",
     "search_tk_collect_products": "/open/v1/product/collect_box/tiktok/collect_box/search_collect_box_detail_list",
+    "get_tk_site_collect_item_info": "/open/v1/product/collect_box/tiktok/collect_box/get_site_collect_item_info",
+    "save_tk_site_collect_item_info": "/open/v1/product/collect_box/tiktok/collect_box/save_site_collect_item_info",
     "get_tk_shop_collect_item_info": "/open/v1/product/collect_box/tiktok/collect_box/get_shop_collect_item_info",
     "save_tk_shop_collect_item_info": "/open/v1/product/collect_box/tiktok/collect_box/save_shop_collect_item_info",
+    "claim_tk_collect_to_shop": "/open/v1/product/collect_box/tiktok/collect_box/claim_to_shop",
+    "delete_tk_collect_products": "/open/v1/product/collect_box/tiktok/collect_box/delete_collect_box_detail",
 }
 TEMPLATES = {
     "大地毯": {

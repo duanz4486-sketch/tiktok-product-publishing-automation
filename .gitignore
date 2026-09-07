@@ -1,6 +1,7 @@
 __pycache__/
 .env
 accounts.json
+ai_settings.json
 runs/
 uploads/
 data/*.db
@@ -11,3 +12,6 @@ data/*.sqlite3-*
 deploy/
 tunnel.log
 tunnel*.log
+app.log
+app.err
+miaoshou-*.zip
