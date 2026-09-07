@@ -721,6 +721,28 @@ def test_ai_description_policy_blocks_banned_words() -> None:
             raise AssertionError(f"{word} should be banned")
 
 
+def test_ai_settings_page_uses_presets_without_rendering_key() -> None:
+    originals = (web_app.load_ai_settings, web_app.all_account_ids)
+    try:
+        web_app.load_ai_settings = lambda: {  # type: ignore[assignment]
+            "provider_key": "dashscope",
+            "provider": "阿里云百炼 / 通义千问",
+            "model": "qwen-vl-max",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "api_key": "secret-value",
+        }
+        web_app.all_account_ids = lambda config=None: []  # type: ignore[assignment]
+        html = web_app.render_ai_settings("网页操作").decode("utf-8")
+    finally:
+        web_app.load_ai_settings, web_app.all_account_ids = originals
+
+    assert 'name="provider_key"' in html
+    assert "阿里云百炼 / 通义千问" in html
+    assert "OpenAI" in html
+    assert 'id="ai_settings_action" name="action" value="save"' in html
+    assert "secret-value" not in html
+
+
 def test_upload_single_images_keeps_order() -> None:
     original_put = web_app.put_oss_object
     temp_root = Path(tempfile.mkdtemp())
@@ -958,6 +980,67 @@ def test_single_job_auto_ai_merges_description_and_attrs() -> None:
     web_app.JOBS.pop(job_id, None)
 
 
+def test_single_job_ai_failure_blocks_miaoshou_create() -> None:
+    originals = (
+        web_app.upload_single_images,
+        web_app.call_deepseek_ai,
+        web_app.build_common_single_product,
+        web_app.cleanup_created_single_product,
+    )
+    job_id = "job-ai-fail-test"
+    web_app.JOBS[job_id] = {"status": "queued"}
+    created = {"called": False}
+    try:
+        web_app.upload_single_images = lambda files, prefix: ["https://cdn.example/1.jpg"]  # type: ignore[assignment]
+        web_app.call_deepseek_ai = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("AI 服务 HTTP 401（OpenAI）: bad key"))  # type: ignore[assignment]
+
+        def fake_create(*args, **kwargs):
+            created["called"] = True
+            return 11
+
+        web_app.build_common_single_product = fake_create  # type: ignore[assignment]
+        web_app.cleanup_created_single_product = lambda common_id, detail_id, credentials: []  # type: ignore[assignment]
+
+        web_app.run_single_job(
+            job_id,
+            {
+                "credentials": ("key", "secret"),
+                "title": "Soft Striped Throw Blanket For Living Room",
+                "notes": "<p>Soft Striped Throw Blanket For Living Room</p>",
+                "notes_is_fallback": True,
+                "cid": 3,
+                "product_attrs": [],
+                "metadata": {},
+                "auto_ai": True,
+                "sale_attr_id": "size",
+                "spec_name": "Bedding Size",
+                "sku_rows": [{"value": "50x60inch", "price": 8.9, "stock": 100}],
+                "shop_ids": [1],
+                "weight": 0.39,
+                "package_length": 30,
+                "package_width": 20,
+                "package_height": 5,
+                "image_files": [Path(__file__)],
+                "video_file": None,
+                "image_prefix": "single/test",
+                "item_num": "SINGLE-1",
+            },
+        )
+    finally:
+        (
+            web_app.upload_single_images,
+            web_app.call_deepseek_ai,
+            web_app.build_common_single_product,
+            web_app.cleanup_created_single_product,
+        ) = originals
+
+    assert not created["called"]
+    assert web_app.JOBS[job_id]["status"] == "failed"
+    assert web_app.JOBS[job_id]["summary"]["ai"]["status"] == "failed"
+    assert "AI 认证失败" in web_app.JOBS[job_id]["summary"]["error"]
+    web_app.JOBS.pop(job_id, None)
+
+
 if __name__ == "__main__":
     test_zip_subset_is_used_as_source_of_truth()
     test_saved_account_form_can_edit_key_without_revealing_secret()
@@ -979,10 +1062,12 @@ if __name__ == "__main__":
     test_single_form_shows_required_category_attrs_before_package_fields()
     test_deepseek_ai_suggestion_uses_images_and_returns_clean_attrs()
     test_ai_description_policy_blocks_banned_words()
+    test_ai_settings_page_uses_presets_without_rendering_key()
     test_upload_single_images_keeps_order()
     test_unified_single_image_upload_accepts_images_and_zip()
     test_batch_folder_upload_preserves_sequence_folders()
     test_upload_single_video_uses_video_folder()
     test_single_form_renders_ai_suggestion_button()
     test_single_job_auto_ai_merges_description_and_attrs()
+    test_single_job_ai_failure_blocks_miaoshou_create()
     print("ok")

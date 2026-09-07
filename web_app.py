@@ -47,6 +47,43 @@ CATEGORY_CACHE_LOCK = threading.Lock()
 SINGLE_IMAGE_LIMIT = 9
 VALID_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm"}
 MIN_AI_DESCRIPTION_CHARS = 1000
+AI_PROVIDER_PRESETS = {
+    "deepseek": {
+        "label": "DeepSeek",
+        "model": "deepseek-v4-flash-vision-exp",
+        "base_url": "https://api.deepseek.com/chat/completions",
+        "env": "DEEPSEEK_API_KEY",
+        "help": "适合当前流程，已支持 OpenAI 兼容和图片输入。",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "model": "gpt-4.1-mini",
+        "base_url": "https://api.openai.com/v1/chat/completions",
+        "env": "OPENAI_API_KEY",
+        "help": "需要服务器能访问 OpenAI，并选择支持图片识别的模型。",
+    },
+    "dashscope": {
+        "label": "阿里云百炼 / 通义千问",
+        "model": "qwen-vl-max",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "env": "DASHSCOPE_API_KEY",
+        "help": "API Key 必须和接口地域匹配；如使用专属工作空间，请改接口地址。",
+    },
+    "volcengine": {
+        "label": "火山方舟 / 豆包",
+        "model": "doubao-1.5-vision-pro-32k",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "env": "ARK_API_KEY",
+        "help": "通常需要填写火山方舟实际模型名或推理接入点 ID。",
+    },
+    "custom": {
+        "label": "自定义 OpenAI 兼容接口",
+        "model": "",
+        "base_url": "",
+        "env": "AI_API_KEY",
+        "help": "用于第三方中转或其他兼容服务，需自行填写接口地址和模型名。",
+    },
+}
 BANNED_AI_DESCRIPTION_PATTERNS = [
     (re.compile(r"\bkids?\b", re.I), "kid/kids"),
     (re.compile(r"\bchild(?:ren)?\b", re.I), "child/children"),
@@ -616,22 +653,46 @@ def load_ai_settings() -> dict:
         settings = json.loads(AI_SETTINGS_PATH.read_text(encoding="utf-8"))
     else:
         settings = {}
-    settings.setdefault("provider", "DeepSeek")
-    settings.setdefault("model", "deepseek-v4-flash-vision-exp")
+    provider_key = str(settings.get("provider_key") or "").strip().lower()
+    if not provider_key:
+        provider_text = str(settings.get("provider") or "DeepSeek").strip().lower()
+        if "deepseek" in provider_text:
+            provider_key = "deepseek"
+        elif "openai" in provider_text:
+            provider_key = "openai"
+        elif "dashscope" in provider_text or "通义" in provider_text or "百炼" in provider_text or "qwen" in provider_text:
+            provider_key = "dashscope"
+        elif "volc" in provider_text or "火山" in provider_text or "豆包" in provider_text:
+            provider_key = "volcengine"
+        else:
+            provider_key = "custom"
+    if provider_key not in AI_PROVIDER_PRESETS:
+        provider_key = "custom"
+    preset = AI_PROVIDER_PRESETS[provider_key]
+    settings["provider_key"] = provider_key
+    settings["provider"] = preset["label"]
+    settings.setdefault("model", preset["model"])
     settings.setdefault("language", "zh-CN")
-    settings.setdefault("base_url", "https://api.deepseek.com/chat/completions")
+    settings.setdefault("base_url", preset["base_url"])
     if str(settings.get("model") or "").lower() == "deepseek-v4-flash-vision-exp":
         settings["model"] = "deepseek-v4-flash-vision-exp"
     if not settings.get("api_key"):
-        settings["api_key"] = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        settings["api_key"] = os.getenv(preset["env"], "").strip() or os.getenv("AI_API_KEY", "").strip()
     return settings
 
 
 def save_ai_settings(settings: dict) -> None:
     current = load_ai_settings()
     api_key = settings.pop("api_key", "")
+    provider_key = str(settings.get("provider_key") or current.get("provider_key") or "deepseek").strip().lower()
+    if provider_key not in AI_PROVIDER_PRESETS:
+        provider_key = "custom"
+    settings["provider_key"] = provider_key
+    settings["provider"] = AI_PROVIDER_PRESETS[provider_key]["label"]
     if api_key:
         current["api_key"] = api_key
+    elif provider_key != current.get("provider_key"):
+        current["api_key"] = ""
     current.update(settings)
     AI_SETTINGS_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -700,16 +761,31 @@ def extract_json_object(text: str) -> dict:
     return json.loads(content[start : end + 1])
 
 
-def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: dict) -> dict:
-    settings = load_ai_settings()
+def ai_provider_label(settings: dict) -> str:
+    key = str(settings.get("provider_key") or "").strip().lower()
+    if key in AI_PROVIDER_PRESETS:
+        return AI_PROVIDER_PRESETS[key]["label"]
+    return str(settings.get("provider") or "OpenAI 兼容接口").strip() or "OpenAI 兼容接口"
+
+
+def normalize_chat_completions_url(base_url: str) -> str:
+    url = str(base_url or "").strip()
+    if not url:
+        return ""
+    return url.rstrip("/") if url.rstrip("/").endswith("/chat/completions") else url.rstrip("/") + "/chat/completions"
+
+
+def call_openai_compatible_chat(settings: dict, content: list[dict], timeout: int = 90) -> str:
+    provider = ai_provider_label(settings)
     api_key = str(settings.get("api_key") or "").strip()
     if not api_key:
-        raise RuntimeError("还没有配置 DeepSeek API Key，请先到 AI 设置页面保存。")
-    model = str(settings.get("model") or "deepseek-v4-flash-vision-exp").strip()
-    base_url = str(settings.get("base_url") or "https://api.deepseek.com/chat/completions").strip()
-    content: list[dict] = [{"type": "text", "text": ai_suggestion_prompt(title, notes, metadata)}]
-    for file_path in image_files[: min(3, SINGLE_IMAGE_LIMIT)]:
-        content.append({"type": "image_url", "image_url": {"url": image_data_url(file_path), "detail": "low"}})
+        raise RuntimeError(f"还没有配置 {provider} API Key，请先到 AI 设置页面保存。")
+    model = str(settings.get("model") or "").strip()
+    if not model:
+        raise RuntimeError(f"{provider} 模型名称为空，请到 AI 设置页面填写支持图片识别的模型。")
+    base_url = normalize_chat_completions_url(str(settings.get("base_url") or ""))
+    if not base_url:
+        raise RuntimeError(f"{provider} 接口地址为空，请到 AI 设置页面填写 Chat Completions 地址。")
     body = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
@@ -723,17 +799,26 @@ def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: 
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=90) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"DeepSeek HTTP {exc.code}: {detail[:300]}") from exc
+        raise RuntimeError(f"AI 服务 HTTP {exc.code}（{provider}）: {detail[:300]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"DeepSeek 网络请求失败: {exc.reason}") from exc
+        raise RuntimeError(f"AI 服务网络请求失败（{provider}）: {exc.reason}") from exc
     data = json.loads(payload)
     message = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
     if not message:
-        raise RuntimeError(f"DeepSeek 没有返回建议内容: {payload[:300]}")
+        raise RuntimeError(f"AI 服务没有返回建议内容（{provider}）: {payload[:300]}")
+    return message
+
+
+def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: dict) -> dict:
+    settings = load_ai_settings()
+    content: list[dict] = [{"type": "text", "text": ai_suggestion_prompt(title, notes, metadata)}]
+    for file_path in image_files[: min(3, SINGLE_IMAGE_LIMIT)]:
+        content.append({"type": "image_url", "image_url": {"url": image_data_url(file_path), "detail": "low"}})
+    message = call_openai_compatible_chat(settings, content)
     suggestion = extract_json_object(message)
     description = str(suggestion.get("description_html") or "").strip()
     if description:
@@ -767,6 +852,46 @@ def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: 
         "attributes": cleaned_attrs,
         "warnings": [str(item) for item in (suggestion.get("warnings") or []) if str(item).strip()],
     }
+
+
+def test_ai_settings(settings: dict) -> None:
+    png_data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    content = [
+        {
+            "type": "text",
+            "text": '请确认你能读取图片并严格只返回 JSON：{"ok":true,"summary":"short English image summary"}',
+        },
+        {"type": "image_url", "image_url": {"url": png_data_url, "detail": "low"}},
+    ]
+    result = extract_json_object(call_openai_compatible_chat(settings, content, timeout=45))
+    if not result.get("ok"):
+        raise RuntimeError("AI 测试没有返回 ok=true，请检查模型是否支持图片识别和 JSON 输出。")
+
+
+def ai_settings_from_form(form: cgi.FieldStorage) -> dict:
+    provider_key = field_text(form, "provider_key", "deepseek").lower()
+    if provider_key not in AI_PROVIDER_PRESETS:
+        provider_key = "custom"
+    preset = AI_PROVIDER_PRESETS[provider_key]
+    return {
+        "provider_key": provider_key,
+        "provider": preset["label"],
+        "model": field_text(form, "model", preset["model"]),
+        "base_url": field_text(form, "base_url", preset["base_url"]),
+        "language": "zh-CN",
+        "api_key": field_text(form, "api_key"),
+    }
+
+
+def settings_for_ai_test(posted: dict) -> dict:
+    current = load_ai_settings()
+    if not posted.get("api_key") and posted.get("provider_key") == current.get("provider_key"):
+        posted = dict(posted)
+        posted["api_key"] = current.get("api_key", "")
+    return posted
 
 
 def ai_configured() -> bool:
@@ -1076,7 +1201,7 @@ def run_single_job(job_id: str, params: dict) -> None:
         skus = resolve_skus(params["sku_rows"], image_urls, params["weight"])
         notes = params["notes"]
         product_attrs = list(params["product_attrs"])
-        ai_status: dict[str, object] = {"status": "skipped", "reason": "未配置 DeepSeek API Key"}
+        ai_status: dict[str, object] = {"status": "skipped", "reason": "已在页面应用 AI 建议或未请求 AI"}
         if params.get("auto_ai"):
             set_job(job_id, status="ai_processing")
             try:
@@ -1097,6 +1222,8 @@ def run_single_job(job_id: str, params: dict) -> None:
                 }
             except Exception as exc:
                 ai_status = {"status": "failed", "error": readable_error_text(exc) or repr(exc)}
+                result["ai"] = ai_status
+                raise RuntimeError("AI 处理失败：" + ai_status["error"]) from exc
         result["ai"] = ai_status
         set_job(job_id, status="running")
         common_id = build_common_single_product(
@@ -1320,12 +1447,18 @@ def readable_error_text(error: object) -> str:
         return "OSS 上传权限失败：检查 AccessKey、Bucket 权限和地区配置。"
     if "appNotFound" in text:
         return "妙手应用不存在或未启用：检查 App Key/App Secret 是否对应当前妙手账号。"
-    if "DeepSeek HTTP 401" in text or "DeepSeek HTTP 403" in text:
-        return "DeepSeek 认证失败：检查 AI 设置里的 API Key 是否正确、是否有权限调用视觉模型。"
-    if "DeepSeek HTTP 400" in text:
-        return "DeepSeek 请求参数失败：检查模型是否支持图片识别，建议使用 deepseek-v4-flash-vision-exp。"
-    if "DeepSeek 网络请求失败" in text:
-        return "DeepSeek 网络请求失败：检查服务器是否能访问 DeepSeek API。"
+    if "AI 服务 HTTP 401" in text or "AI 服务 HTTP 403" in text or "DeepSeek HTTP 401" in text or "DeepSeek HTTP 403" in text:
+        return "AI 认证失败：检查 AI 设置里的 API Key 是否正确、是否有权限调用当前视觉模型。"
+    if "AI 服务 HTTP 400" in text or "DeepSeek HTTP 400" in text:
+        return "AI 请求参数失败：检查接口地址是否为 Chat Completions，模型是否支持图片识别和 JSON 输出。"
+    if "AI 服务 HTTP 404" in text:
+        return "AI 接口地址错误：检查 AI 设置里的接口地址是否填对。"
+    if "AI 服务 HTTP 402" in text or "AI 服务 HTTP 429" in text:
+        return "AI 额度或限流问题：检查余额、套餐、调用频率和模型权限。"
+    if "AI 服务网络请求失败" in text or "DeepSeek 网络请求失败" in text:
+        return "AI 网络请求失败：检查服务器是否能访问当前 AI 服务接口。"
+    if "AI 没有返回可解析的 JSON" in text or "AI 服务没有返回建议内容" in text or "AI 测试没有返回 ok=true" in text:
+        return "AI 返回格式不正确：检查模型是否支持 JSON 输出，或换一个视觉模型重试。"
     if "create_common_collect_product" in text:
         return "妙手创建公共采集箱产品接口失败：检查接口权限和妙手接口文档路径。"
     if "查询 TikTok 详情失败" in text:
@@ -1874,8 +2007,8 @@ def render_page(title: str, body: str, refresh: bool = False, header_right: str 
   <main>{body}</main>
   <script>
     document.querySelectorAll('form[data-submit-lock]').forEach((form) => {{
-      form.addEventListener('submit', () => {{
-        const button = form.querySelector('button[type="submit"]');
+      form.addEventListener('submit', (event) => {{
+        const button = event.submitter || form.querySelector('button[type="submit"]');
         if (button) {{
           button.disabled = true;
           button.textContent = button.dataset.workingLabel || '处理中...';
@@ -2821,6 +2954,16 @@ def render_ai_settings(username: str, message: str = "", error: str = "") -> byt
     settings = load_ai_settings()
     message_html = alert_html("success", message)
     error_html = alert_html("error", error)
+    provider_key = str(settings.get("provider_key") or "deepseek")
+    provider_options = "\n".join(
+        f'<option value="{e(key)}"{" selected" if key == provider_key else ""}>{e(preset["label"])}</option>'
+        for key, preset in AI_PROVIDER_PRESETS.items()
+    )
+    preset_public = {
+        key: {name: preset[name] for name in ("label", "model", "base_url", "help")}
+        for key, preset in AI_PROVIDER_PRESETS.items()
+    }
+    provider_help = AI_PROVIDER_PRESETS.get(provider_key, AI_PROVIDER_PRESETS["custom"])["help"]
     body = f"""
 {render_top_nav("ai")}
 <section>
@@ -2833,21 +2976,22 @@ def render_ai_settings(username: str, message: str = "", error: str = "") -> byt
   {message_html}
   {error_html}
   <form action="/ai-settings" method="post" data-submit-lock>
+    <input type="hidden" id="ai_settings_action" name="action" value="save">
     <div class="form-grid">
       <div class="field-card">
-        <label for="provider">AI 服务</label>
-        <input id="provider" name="provider" value="{e(settings.get("provider", "DeepSeek"))}">
-        <p class="field-help">例如 DeepSeek；只作为网页里的服务名称。</p>
+        <label for="provider_key">AI 服务</label>
+        <select id="provider_key" name="provider_key">{provider_options}</select>
+        <p class="field-help" id="providerHelp">{e(provider_help)}</p>
       </div>
       <div class="field-card">
         <label for="model">视觉模型</label>
-        <input id="model" name="model" value="{e(settings.get("model", "deepseek-v4-flash-vision-exp"))}">
+        <input id="model" name="model" value="{e(settings.get("model", ""))}">
         <p class="field-help">需要支持图片识别，不能只用纯文本模型。</p>
       </div>
       <div class="field-card wide">
         <label for="base_url">接口地址</label>
-        <input id="base_url" name="base_url" value="{e(settings.get("base_url", "https://api.deepseek.com/chat/completions"))}">
-        <p class="field-help">默认使用 DeepSeek OpenAI 兼容的 Chat Completions 地址。</p>
+        <input id="base_url" name="base_url" value="{e(settings.get("base_url", ""))}">
+        <p class="field-help">填写 OpenAI 兼容的 Chat Completions 地址；也可以只填到 /v1，程序会自动补全 /chat/completions。</p>
       </div>
       <div class="field-card wide">
         <label for="api_key">API Key</label>
@@ -2856,9 +3000,25 @@ def render_ai_settings(username: str, message: str = "", error: str = "") -> byt
       </div>
       <div class="alert alert-info wide">页面默认中文；AI 自动填写只作为建议，最终保存到妙手的标题、描述、规格和自定义属性仍要求英文。图片和标题里没有明确证据的软参数应留空。</div>
     </div>
-    <div class="actions"><button type="submit" data-working-label="正在保存 AI 设置...">保存 AI 设置</button></div>
+    <div class="actions">
+      <button type="submit" data-working-label="正在保存 AI 设置..." onclick="document.getElementById('ai_settings_action').value='save'">保存 AI 设置</button>
+      <button type="submit" class="ghost" data-working-label="正在测试 AI 配置..." onclick="document.getElementById('ai_settings_action').value='test'">测试当前配置</button>
+    </div>
   </form>
-</section>"""
+</section>
+<script>
+const aiPresets = {json.dumps(preset_public, ensure_ascii=False)};
+const providerSelect = document.getElementById('provider_key');
+const modelInput = document.getElementById('model');
+const baseUrlInput = document.getElementById('base_url');
+const providerHelp = document.getElementById('providerHelp');
+providerSelect?.addEventListener('change', () => {{
+  const preset = aiPresets[providerSelect.value] || {{}};
+  if (preset.model) modelInput.value = preset.model;
+  if (preset.base_url) baseUrlInput.value = preset.base_url;
+  providerHelp.textContent = preset.help || '';
+}});
+</script>"""
     account_count = len(all_account_ids())
     return render_page("AI 设置", body, header_right=render_account_menu(username, account_count))
 
@@ -2952,16 +3112,13 @@ class Handler(BaseHTTPRequestHandler):
                     headers=self.headers,
                     environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
                 )
-                save_ai_settings(
-                    {
-                        "provider": field_text(form, "provider", "DeepSeek"),
-                        "model": field_text(form, "model", "deepseek-v4-flash-vision-exp"),
-                        "base_url": field_text(form, "base_url", "https://api.deepseek.com/chat/completions"),
-                        "language": "zh-CN",
-                        "api_key": field_text(form, "api_key"),
-                    }
-                )
-                self.redirect("/ai-settings?message=" + urllib.parse.quote("AI 设置已保存"))
+                settings = ai_settings_from_form(form)
+                if field_text(form, "action", "save") == "test":
+                    test_ai_settings(settings_for_ai_test(settings))
+                    self.redirect("/ai-settings?message=" + urllib.parse.quote("AI 测试成功：当前配置可以返回图片识别 JSON。"))
+                else:
+                    save_ai_settings(settings)
+                    self.redirect("/ai-settings?message=" + urllib.parse.quote("AI 设置已保存"))
             except Exception as exc:
                 self.redirect("/ai-settings?error=" + urllib.parse.quote(str(exc)))
             return
@@ -3086,7 +3243,7 @@ class Handler(BaseHTTPRequestHandler):
                         "cid": cid,
                         "product_attrs": product_attrs,
                         "metadata": metadata,
-                        "auto_ai": ai_configured() and not ai_suggest_applied,
+                        "auto_ai": not ai_suggest_applied,
                         "sale_attr_id": sale_attr_id,
                         "spec_name": spec_name,
                         "sku_rows": sku_rows,
