@@ -110,4 +110,20 @@ cp accounts.json accounts.json.bak
 - `runs/`
 - `uploads/`
 
+## 宝塔临时安装包清理
+
+之前通过宝塔上传的 `miaoshou-*.zip`、`deploy/*.zip` 只是代码同步用的临时安装包。确认新版本已经解压到项目目录、网页能正常打开、GitHub 也已经保存后，这些压缩包可以删除。
+
+不要删除这些真实配置和运行数据：
+
+- `.env`
+- `accounts.json`
+- `ai_settings.json`
+- `data/`
+- `runs/`
+- `uploads/`
+- 当前正在运行的 `.py`、`docs/`、`miaoshou_tool/`、`scripts/`
+
+如果不确定某个文件能不能删，优先先保留，或者下载备份后再清理。
+
 公开发布前建议再过一遍 [公开发布前检查清单](release-checklist.md)。

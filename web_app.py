@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, VALID_IMAGE_EXTS, natural_key, post as miaoshou_post, read_items, run_batch
 from miaoshou_tool import accounts as account_module
 from miaoshou_tool import ai as ai_module
+from miaoshou_tool import errors as error_module
 from miaoshou_tool import files as file_module
 from miaoshou_tool import json_io
 from miaoshou_tool import miaoshou_api
@@ -98,12 +99,8 @@ SITE = "US"
 DEFAULT_OPERATOR = "网页操作"
 
 
-def e(value: object) -> str:
-    return rendering.escape(value)
-
-
-def alert_html(kind: str, message: object) -> str:
-    return rendering.alert_html(kind, message)
+e = rendering.escape
+alert_html = rendering.alert_html
 
 
 def field_text(form: cgi.FieldStorage, name: str, default: str = "") -> str:
@@ -113,48 +110,22 @@ def field_text(form: cgi.FieldStorage, name: str, default: str = "") -> str:
     return str(field.value or default).strip()
 
 
-def load_accounts_config() -> dict:
-    return account_module.load_accounts_config()
-
-
-def save_accounts_config(config: dict) -> None:
-    account_module.save_accounts_config(config)
-
-
-def default_template_ids() -> dict[str, int]:
-    return account_module.default_template_ids()
-
-
-def all_account_ids(config: dict | None = None) -> list[str]:
-    return account_module.all_account_ids(config)
-
-
-def user_record(username: str) -> dict | None:
-    return account_module.user_record(username)
-
-
-def user_record_in_config(config: dict, username: str) -> dict | None:
-    return account_module.user_record_in_config(config, username)
-
-
-def allowed_account_ids(user: dict) -> list[str]:
-    return account_module.allowed_account_ids(user)
-
-
-def clean_prefix(value: str) -> str:
-    return file_module.clean_prefix(value)
+load_accounts_config = account_module.load_accounts_config
+save_accounts_config = account_module.save_accounts_config
+default_template_ids = account_module.default_template_ids
+all_account_ids = account_module.all_account_ids
+user_record = account_module.user_record
+user_record_in_config = account_module.user_record_in_config
+allowed_account_ids = account_module.allowed_account_ids
+clean_prefix = file_module.clean_prefix
 
 
 def save_upload(form: cgi.FieldStorage, name: str, target: Path) -> None:
     file_module.save_upload(form, name, target)
 
 
-def safe_upload_relative_path(filename: object) -> Path | None:
-    return file_module.safe_upload_relative_path(filename)
-
-
-def extract_zip(zip_path: Path, target: Path) -> None:
-    file_module.extract_zip(zip_path, target)
+safe_upload_relative_path = file_module.safe_upload_relative_path
+extract_zip = file_module.extract_zip
 
 
 def stage_batch_images(form: cgi.FieldStorage, upload_dir: Path, image_root: Path) -> tuple[str, list[tuple[Path, str]]]:
@@ -181,12 +152,8 @@ def upload_source_files_to_oss(image_prefix: str, source_files: list[tuple[Path,
     return oss_upload.upload_source_files_to_oss(image_prefix, source_files, put_object=put_oss_object)
 
 
-def upload_filename(form: cgi.FieldStorage, name: str, default: str) -> str:
-    return file_module.upload_filename(form, name, default)
-
-
-def field_list(form: cgi.FieldStorage, name: str) -> list[cgi.FieldStorage]:
-    return file_module.field_list(form, name)
+upload_filename = file_module.upload_filename
+field_list = file_module.field_list
 
 
 def decimal_field(form: cgi.FieldStorage, name: str, label: str, minimum: float | None = None, maximum: float | None = None) -> float:
@@ -217,44 +184,26 @@ def int_field(form: cgi.FieldStorage, name: str, label: str, minimum: int | None
     return number
 
 
-def contains_cjk(value: str) -> bool:
-    return ai_module.contains_cjk(value)
-
-
-def require_english(value: str, label: str) -> None:
-    ai_module.require_english(value, label)
-
-
-def require_ai_description_policy(value: str) -> None:
-    ai_module.require_ai_description_policy(value)
-
-
-def account_credentials(account: dict) -> tuple[str, str]:
-    return account_module.account_credentials(account)
-
-
-def expect_miaoshou_success(response: dict, label: str) -> dict:
-    return miaoshou_api.expect_miaoshou_success(response, label)
-
-
-def shop_display_name(shop: dict) -> str:
-    return miaoshou_api.shop_display_name(shop)
+contains_cjk = ai_module.contains_cjk
+require_english = ai_module.require_english
+require_ai_description_policy = ai_module.require_ai_description_policy
+account_credentials = account_module.account_credentials
+expect_miaoshou_success = miaoshou_api.expect_miaoshou_success
+shop_display_name = miaoshou_api.shop_display_name
 
 
 def get_tiktok_shops(credentials: tuple[str, str]) -> list[dict]:
     return miaoshou_api.get_tiktok_shops(credentials, miaoshou_post)
 
 
-def pick_warehouse(warehouses: list[dict]) -> dict | None:
-    return miaoshou_api.pick_warehouse(warehouses)
+pick_warehouse = miaoshou_api.pick_warehouse
 
 
 def get_default_warehouse_ids(shop_ids: list[int], credentials: tuple[str, str]) -> dict[str, str]:
     return miaoshou_api.get_default_warehouse_ids(shop_ids, credentials, miaoshou_post)
 
 
-def flatten_category_tree(cate_tree: dict) -> list[dict]:
-    return miaoshou_api.flatten_category_tree(cate_tree)
+flatten_category_tree = miaoshou_api.flatten_category_tree
 
 
 def load_categories(credentials: tuple[str, str]) -> list[dict]:
@@ -266,40 +215,15 @@ def get_category_metadata(cid: int, credentials: tuple[str, str], shop_ids: list
     return miaoshou_api.get_category_metadata(cid, credentials, miaoshou_post, shop_ids)
 
 
-def metadata_attrs(metadata: dict, key: str) -> list[dict]:
-    return miaoshou_api.metadata_attrs(metadata, key)
-
-
-def truthy_flag(value: object) -> bool:
-    return miaoshou_api.truthy_flag(value)
-
-
-def attr_label(attr: dict) -> str:
-    return miaoshou_api.attr_label(attr)
-
-
-def is_required_attr(attr: dict) -> bool:
-    return miaoshou_api.is_required_attr(attr)
-
-
-def category_required_notes(metadata: dict) -> list[str]:
-    return miaoshou_api.category_required_notes(metadata)
-
-
-def save_uploaded_file(field: cgi.FieldStorage, target: Path) -> Path:
-    return file_module.save_uploaded_file(field, target)
-
-
-def uploaded_image_files(form: cgi.FieldStorage, upload_dir: Path) -> list[Path]:
-    return file_module.uploaded_image_files(form, upload_dir)
-
-
-def uploaded_sku_image_files(form: cgi.FieldStorage, upload_dir: Path) -> dict[str, Path]:
-    return file_module.uploaded_sku_image_files(form, upload_dir)
-
-
-def uploaded_video_file(form: cgi.FieldStorage, upload_dir: Path) -> Path | None:
-    return file_module.uploaded_video_file(form, upload_dir)
+metadata_attrs = miaoshou_api.metadata_attrs
+truthy_flag = miaoshou_api.truthy_flag
+attr_label = miaoshou_api.attr_label
+is_required_attr = miaoshou_api.is_required_attr
+category_required_notes = miaoshou_api.category_required_notes
+save_uploaded_file = file_module.save_uploaded_file
+uploaded_image_files = file_module.uploaded_image_files
+uploaded_sku_image_files = file_module.uploaded_sku_image_files
+uploaded_video_file = file_module.uploaded_video_file
 
 
 def upload_single_images(files: list[Path], object_prefix: str) -> list[str]:
@@ -318,28 +242,12 @@ def save_ai_settings(settings: dict) -> None:
     ai_module.save_ai_settings(settings, load_ai_settings)
 
 
-def image_data_url(file_path: Path) -> str:
-    return ai_module.image_data_url(file_path)
-
-
-def attr_prompt_rows(attrs: list[dict]) -> list[dict]:
-    return ai_module.attr_prompt_rows(attrs)
-
-
-def ai_suggestion_prompt(title: str, notes: str, metadata: dict) -> str:
-    return ai_module.ai_suggestion_prompt(title, notes, metadata)
-
-
-def extract_json_object(text: str) -> dict:
-    return ai_module.extract_json_object(text)
-
-
-def ai_provider_label(settings: dict) -> str:
-    return ai_module.ai_provider_label(settings)
-
-
-def normalize_chat_completions_url(base_url: str) -> str:
-    return ai_module.normalize_chat_completions_url(base_url)
+image_data_url = ai_module.image_data_url
+attr_prompt_rows = ai_module.attr_prompt_rows
+ai_suggestion_prompt = ai_module.ai_suggestion_prompt
+extract_json_object = ai_module.extract_json_object
+ai_provider_label = ai_module.ai_provider_label
+normalize_chat_completions_url = ai_module.normalize_chat_completions_url
 
 
 def call_openai_compatible_chat(settings: dict, content: list[dict], timeout: int = 90) -> str:
@@ -392,8 +300,7 @@ def build_product_attributes(form: cgi.FieldStorage, metadata: dict) -> list[dic
     return publishing_module.build_product_attributes(form, metadata, field_text)
 
 
-def custom_value_id(index: int) -> str:
-    return publishing_module.custom_value_id(index)
+custom_value_id = publishing_module.custom_value_id
 
 
 def get_site_info(detail_id: int, credentials: tuple[str, str]) -> tuple[str, dict]:
@@ -456,8 +363,7 @@ def cleanup_created_single_product(common_id: int | None, detail_id: int | None,
     return errors
 
 
-def resolve_skus(sku_rows: list[dict], image_urls: list[str], weight: float) -> list[dict]:
-    return publishing_module.resolve_skus(sku_rows, image_urls, weight)
+resolve_skus = publishing_module.resolve_skus
 
 
 def parse_sku_rows(form: cgi.FieldStorage, sku_image_paths: dict[str, Path] | None = None) -> tuple[str, str, list[dict]]:
@@ -585,24 +491,11 @@ def start_single_job(job_id: str, params: dict) -> None:
     thread.start()
 
 
-def image_seq_dirs(folder: Path) -> set[int]:
-    return file_module.image_seq_dirs(folder)
-
-
-def image_count_for_seq(image_root: Path, seq: int) -> int:
-    return file_module.image_count_for_seq(image_root, seq)
-
-
-def build_preflight_failures(items: list[dict], image_root: Path, image_seqs: set[int], include_image_only: bool) -> list[dict]:
-    return file_module.build_preflight_failures(items, image_root, image_seqs, include_image_only)
-
-
-def find_image_base(image_root: Path, seqs: list[int]) -> Path | None:
-    return file_module.find_image_base(image_root, seqs)
-
-
-def resolve_image_layout(image_root: Path, batch: str, seqs: list[int], image_prefix: str = "") -> tuple[Path, str]:
-    return file_module.resolve_image_layout(image_root, batch, seqs, image_prefix)
+image_seq_dirs = file_module.image_seq_dirs
+image_count_for_seq = file_module.image_count_for_seq
+build_preflight_failures = file_module.build_preflight_failures
+find_image_base = file_module.find_image_base
+resolve_image_layout = file_module.resolve_image_layout
 
 
 def set_job(job_id: str, **values) -> None:
@@ -637,77 +530,13 @@ def progress_html(job: dict) -> str:
 
 
 STATUS_LABELS = rendering.STATUS_LABELS
+status_label = rendering.status_label
+status_badge = rendering.status_badge
 
 
-def status_label(status: object) -> str:
-    return rendering.status_label(status)
-
-
-def status_badge(status: object) -> str:
-    return rendering.status_badge(status)
-
-
-def readable_error_text(error: object) -> str:
-    text = str(error or "").strip()
-    if not text:
-        return ""
-    if "缺少图片文件夹" in text:
-        return "缺少图片文件夹：检查 ZIP 里是否有对应序号的子文件夹。"
-    if "缺少标题" in text:
-        return "缺少标题：检查 Excel 里是否有这个序号和标题。"
-    if "FileNotFoundError" in text:
-        return "本地文件缺失：请重新上传本次 Excel 和图片 ZIP。"
-    if "HTTPError 404" in text or "Not Found" in text:
-        return "图片链接无法读取：确认本次图片已上传到 OSS，或开启自动上传。"
-    if "SignatureDoesNotMatch" in text or "AccessDenied" in text:
-        return "OSS 上传权限失败：检查 AccessKey、Bucket 权限和地区配置。"
-    if "appNotFound" in text:
-        return "妙手应用不存在或未启用：检查 App Key/App Secret 是否对应当前妙手账号。"
-    if "AI 服务 HTTP 401" in text or "AI 服务 HTTP 403" in text or "DeepSeek HTTP 401" in text or "DeepSeek HTTP 403" in text:
-        return "AI 认证失败：检查 AI 设置里的 API Key 是否正确、是否有权限调用当前视觉模型。"
-    if "AI 服务 HTTP 400" in text or "DeepSeek HTTP 400" in text:
-        return "AI 请求参数失败：检查接口地址是否为 Chat Completions，模型是否支持图片识别和 JSON 输出。"
-    if "AI 服务 HTTP 404" in text:
-        return "AI 接口地址错误：检查 AI 设置里的接口地址是否填对。"
-    if "AI 服务 HTTP 402" in text or "AI 服务 HTTP 429" in text:
-        return "AI 额度或限流问题：检查余额、套餐、调用频率和模型权限。"
-    if "AI 服务网络请求失败" in text or "DeepSeek 网络请求失败" in text:
-        return "AI 网络请求失败：检查服务器是否能访问当前 AI 服务接口。"
-    if "AI 没有返回可解析的 JSON" in text or "AI 服务没有返回建议内容" in text or "AI 测试没有返回 ok=true" in text:
-        return "AI 返回格式不正确：检查模型是否支持 JSON 输出，或换一个视觉模型重试。"
-    if "create_common_collect_product" in text:
-        return "妙手创建公共采集箱产品接口失败：检查接口权限和妙手接口文档路径。"
-    if "查询 TikTok 详情失败" in text:
-        return "查询 TikTok 模板失败：检查妙手账号、店铺和模板是否属于同一个账号。"
-    if "Miaoshou HTTP" in text:
-        return "妙手接口请求失败：" + text[:180]
-    return text[:220]
-
-
-def readable_job_error(job: dict) -> str:
-    direct = readable_error_text(job.get("error"))
-    if direct:
-        return direct
-    for item in job.get("results") or []:
-        if item.get("status") == "failed" and item.get("error"):
-            return readable_error_text(item.get("error"))
-    return ""
-
-
-def ai_status_text(item: dict) -> str:
-    ai = item.get("ai") or {}
-    if not isinstance(ai, dict):
-        return ""
-    status = str(ai.get("status") or "")
-    if status == "success":
-        count = int(ai.get("attributeCount") or 0)
-        desc = str(ai.get("description") or "")
-        return f"成功，属性建议 {count} 个，描述{desc}"
-    if status == "failed":
-        return "失败：" + readable_error_text(ai.get("error"))
-    if status == "skipped":
-        return "未启用：" + str(ai.get("reason") or "")
-    return status
+readable_error_text = error_module.readable_error_text
+readable_job_error = error_module.readable_job_error
+ai_status_text = error_module.ai_status_text
 
 
 def job_count_text(job: dict) -> str:
