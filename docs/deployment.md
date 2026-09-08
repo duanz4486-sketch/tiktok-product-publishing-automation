@@ -6,7 +6,14 @@
 
 ```bash
 python -m pip install -r requirements.txt
+python scripts/check_setup.py
 python web_app.py --host 127.0.0.1 --port 8002
+```
+
+Windows 可以使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1
 ```
 
 浏览器打开：
@@ -18,7 +25,7 @@ http://127.0.0.1:8002/
 ## 局域网或服务器运行
 
 ```bash
-python web_app.py --host 0.0.0.0 --port 8002
+bash scripts/run_server.sh
 ```
 
 然后访问：
@@ -47,6 +54,7 @@ http://服务器IP:8002/check
 ```bash
 cd /www/wwwroot/miaoshou
 /www/server/python_manager/versions/3.10.0/bin/python3 -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+/www/server/python_manager/versions/3.10.0/bin/python3 scripts/check_setup.py
 nohup /www/server/python_manager/versions/3.10.0/bin/python3 web_app.py --host 0.0.0.0 --port 8002 > app.log 2>&1 &
 ```
 
@@ -61,7 +69,13 @@ tail -50 app.err
 
 `nohup` 适合临时测试。长期每天给团队使用时，建议改成 systemd 或宝塔的进程守护方式，保证服务器重启后自动恢复。
 
-systemd 示例：
+systemd 示例文件在：
+
+```text
+scripts/miaoshou.service.example
+```
+
+内容示例：
 
 ```ini
 [Unit]

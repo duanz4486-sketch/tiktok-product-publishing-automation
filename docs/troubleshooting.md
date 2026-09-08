@@ -10,6 +10,14 @@
 - 没有 `accounts.json`：复制 `accounts.example.json` 为 `accounts.json`，或在网页新增妙手账号。
 - 妙手账号缺模板 ID：进入「妙手账号管理」重新识别或手动填写模板 ID。
 
+命令行也可以运行：
+
+```bash
+python scripts/check_setup.py
+```
+
+如果这个命令返回 `ERROR`，先修复错误项，再启动网页。
+
 ## 网页打不开
 
 检查：

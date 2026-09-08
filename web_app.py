@@ -1262,7 +1262,7 @@ def render_release_check(username: str) -> bytes:
           <td>{status_badge(item["status"])}</td>
           <td>{e(item["label"])}</td>
           <td>{e(item["message"])}</td>
-          <td>{e(item.get("fix") or "无需处理")}</td>
+          <td>{e(item.get("fix") if item["status"] != "ok" and item.get("fix") else "无需处理")}</td>
         </tr>"""
         for item in report["checks"]
     )

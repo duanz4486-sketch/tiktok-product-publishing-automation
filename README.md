@@ -51,6 +51,12 @@ copy accounts.example.json accounts.json
 python web_app.py --host 127.0.0.1 --port 8002
 ```
 
+Windows 也可以直接运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1
+```
+
 6. 浏览器打开：
 
 ```text
@@ -58,6 +64,12 @@ http://127.0.0.1:8002/
 ```
 
 7. 先打开「系统自检」，确认没有红色失败项，再使用「模板批量上传」。
+
+也可以在命令行运行自检：
+
+```bash
+python scripts/check_setup.py
+```
 
 服务器部署时请参考 [部署说明](docs/deployment.md)。
 
