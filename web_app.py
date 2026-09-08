@@ -23,12 +23,14 @@ from miaoshou_tool import accounts as account_module
 from miaoshou_tool import ai as ai_module
 from miaoshou_tool import errors as error_module
 from miaoshou_tool import files as file_module
+from miaoshou_tool import forms as form_module
 from miaoshou_tool import json_io
 from miaoshou_tool import miaoshou_api
 from miaoshou_tool import oss_upload
 from miaoshou_tool import publishing as publishing_module
 from miaoshou_tool import rendering
 from miaoshou_tool import self_check
+from miaoshou_tool import text as text_module
 
 ROOT = Path(__file__).resolve().parent
 UPLOAD_ROOT = ROOT / "uploads"
@@ -103,11 +105,7 @@ e = rendering.escape
 alert_html = rendering.alert_html
 
 
-def field_text(form: cgi.FieldStorage, name: str, default: str = "") -> str:
-    field = form[name] if name in form else None
-    if field is None or isinstance(field, list):
-        return default
-    return str(field.value or default).strip()
+field_text = form_module.field_text
 
 
 load_accounts_config = account_module.load_accounts_config
@@ -156,32 +154,8 @@ upload_filename = file_module.upload_filename
 field_list = file_module.field_list
 
 
-def decimal_field(form: cgi.FieldStorage, name: str, label: str, minimum: float | None = None, maximum: float | None = None) -> float:
-    value = field_text(form, name)
-    if not value:
-        raise ValueError(f"请填写{label}")
-    try:
-        number = float(value)
-    except ValueError:
-        raise ValueError(f"{label}必须是数字")
-    if minimum is not None and number < minimum:
-        raise ValueError(f"{label}不能小于 {minimum}")
-    if maximum is not None and number > maximum:
-        raise ValueError(f"{label}不能大于 {maximum}")
-    return number
-
-
-def int_field(form: cgi.FieldStorage, name: str, label: str, minimum: int | None = None) -> int:
-    value = field_text(form, name)
-    if not value:
-        raise ValueError(f"请填写{label}")
-    try:
-        number = int(value)
-    except ValueError:
-        raise ValueError(f"{label}必须是整数")
-    if minimum is not None and number < minimum:
-        raise ValueError(f"{label}不能小于 {minimum}")
-    return number
+decimal_field = form_module.decimal_field
+int_field = form_module.int_field
 
 
 contains_cjk = ai_module.contains_cjk
@@ -545,31 +519,9 @@ def job_count_text(job: dict) -> str:
     return f"{done} / {total}" if total else str(done)
 
 
-def masked_app_key(value: str) -> str:
-    value = str(value or "")
-    if not value:
-        return "缺少 APP ID"
-    if len(value) <= 8:
-        return value[:2] + "..." + value[-2:]
-    return value[:4] + "..." + value[-4:]
-
-
-def normalized_text(value: object) -> str:
-    if isinstance(value, dict):
-        return " ".join(normalized_text(item) for item in value.values())
-    if isinstance(value, list):
-        return " ".join(normalized_text(item) for item in value)
-    return re.sub(r"\s+", "", str(value or "")).lower()
-
-
-def optional_int(value: str, label: str) -> int | None:
-    value = str(value or "").strip()
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        raise ValueError(f"{label} 必须是数字")
+masked_app_key = text_module.masked_app_key
+normalized_text = text_module.normalized_text
+optional_int = form_module.optional_int
 
 
 def matched_template_name(text: str) -> str | None:

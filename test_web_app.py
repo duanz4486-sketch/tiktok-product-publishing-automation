@@ -36,6 +36,20 @@ def test_json_helpers_use_one_compact_safe_format() -> None:
     assert web_app.json_for_html(payload) == '{"message":"<\\/script>","items":[1,"二"]}'
 
 
+def test_moved_form_and_text_helpers_keep_web_app_contract() -> None:
+    assert web_app.masked_app_key("ak_b123456789f69c") == "ak_b...f69c"
+    assert web_app.normalized_text({"group": "非 定 制 毛 毯"}) == "非定制毛毯"
+    assert web_app.optional_int("", "数量") is None
+    assert web_app.optional_int("3", "数量") == 3
+
+    try:
+        web_app.optional_int("abc", "数量")
+    except ValueError as exc:
+        assert "数量 必须是数字" in str(exc)
+    else:
+        raise AssertionError("optional_int should reject non-numeric values")
+
+
 def test_saved_account_form_can_edit_key_without_revealing_secret() -> None:
     app_key = "ak_b123456789f69c"
     html = web_app.render_account_row(
