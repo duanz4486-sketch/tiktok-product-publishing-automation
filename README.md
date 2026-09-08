@@ -72,6 +72,12 @@ http://127.0.0.1:8002/
 python scripts/check_setup.py
 ```
 
+公开发布到 GitHub 前建议再运行：
+
+```bash
+python scripts/check_public_release.py
+```
+
 服务器部署时请参考 [部署说明](docs/deployment.md)。
 
 ## 安全提醒

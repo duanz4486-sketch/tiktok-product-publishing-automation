@@ -31,6 +31,7 @@
 
 ```bash
 git status --short
+python scripts/check_public_release.py
 python scripts/check_setup.py
 python test_web_app.py
 ```

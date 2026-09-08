@@ -18,6 +18,16 @@ python scripts/check_setup.py
 
 如果这个命令返回 `ERROR`，先修复错误项，再启动网页。
 
+## 公开发布检查失败
+
+运行：
+
+```bash
+python scripts/check_public_release.py
+```
+
+如果提示有 `Private/generated files are tracked`，说明真实配置、日志、运行结果、上传图片或临时压缩包被 Git 跟踪了。先把这些文件从 Git 跟踪中移除，但不要删除本地真实配置。
+
 ## 网页打不开
 
 检查：
