@@ -109,3 +109,5 @@ cp accounts.json accounts.json.bak
 - `ai_settings.json`
 - `runs/`
 - `uploads/`
+
+公开发布前建议再过一遍 [公开发布前检查清单](release-checklist.md)。

@@ -172,6 +172,10 @@ def test_home_uses_saved_miaoshou_accounts_without_web_user() -> None:
         html = web_app.render_home("anyone").decode("utf-8")
 
         assert "新建批次" in html
+        assert "模板批量上传" in html
+        assert "稳定" in html
+        assert "单产品智能上传" in html
+        assert "开发中" in html
         assert "测试妙手账号" in html
         assert "登录" not in html
         assert "用户名" not in html
@@ -347,6 +351,7 @@ def test_single_form_uses_local_sku_image_upload() -> None:
 
         html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
 
+        assert "单产品智能上传仍在开发和完善中" in html
         assert 'name="sku_image_file_0"' in html
         assert 'name="image_upload"' in html
         assert 'id="image_upload_files"' in html

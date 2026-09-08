@@ -55,9 +55,9 @@ def account_menu(account_count: int) -> str:
   <div class="account-panel">
     <p class="account-name">{display_name}</p>
     <p class="account-meta">可用妙手账号：{escape(account_count)}</p>
-    <a class="account-link" href="/">模板批量上传</a>
+    <a class="account-link" href="/">模板批量上传（稳定）</a>
     <a class="account-link" href="/check">系统自检</a>
-    <a class="account-link" href="/single">单产品智能上传</a>
+    <a class="account-link" href="/single">单产品智能上传（开发中）</a>
     <a class="account-link" href="/ai-settings">AI 设置</a>
     <a class="account-link" href="/accounts">妙手账号管理</a>
   </div>
@@ -70,9 +70,9 @@ def top_nav(current: str = "batch") -> str:
 
     return f"""
 <nav class="top-nav">
-  <a href="/"{nav_class("batch")}>模板批量上传</a>
+  <a href="/"{nav_class("batch")}>模板批量上传 <span class="nav-badge stable">稳定</span></a>
   <a href="/check"{nav_class("check")}>系统自检</a>
-  <a href="/single"{nav_class("single")}>单产品智能上传</a>
+  <a href="/single"{nav_class("single")}>单产品智能上传 <span class="nav-badge beta">开发中</span></a>
   <a href="/accounts"{nav_class("accounts")}>妙手账号管理</a>
   <a href="/ai-settings"{nav_class("ai")}>AI 设置</a>
 </nav>"""

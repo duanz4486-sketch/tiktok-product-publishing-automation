@@ -1120,6 +1120,9 @@ def render_page(title: str, body: str, refresh: bool = False, header_right: str 
       background: linear-gradient(var(--bg) 72%, rgba(244, 247, 250, 0));
     }}
     .top-nav a {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
       border-radius: 999px;
       padding: 9px 14px;
       color: var(--text-soft);
@@ -1129,6 +1132,9 @@ def render_page(title: str, body: str, refresh: bool = False, header_right: str 
       box-shadow: var(--shadow-sm);
     }}
     .top-nav a.active {{ color: var(--accent); background: var(--accent-soft); border-color: #bad0ff; }}
+    .nav-badge {{ padding: 2px 6px; border-radius: 999px; font-size: 11px; line-height: 1.2; font-weight: 800; }}
+    .nav-badge.stable {{ color: var(--ok); background: var(--ok-soft); }}
+    .nav-badge.beta {{ color: var(--warn); background: var(--warn-soft); }}
     input, select, textarea {{
       border-color: var(--border-strong);
       border-radius: 8px;
@@ -1949,6 +1955,7 @@ def render_single(username: str, query: dict[str, list[str]] | None = None, erro
     metadata_form = f"""
 <section>
   <h2>选择类目</h2>
+  {alert_html("warn", "单产品智能上传仍在开发和完善中。公开给别人试用时，建议优先使用已经跑通的「模板批量上传」。")}
   {message_html}
   <form action="/single" method="get">
     <div class="grid">

@@ -26,6 +26,7 @@
 - [模板批量上传使用说明](docs/template-batch-upload.md)
 - [部署说明](docs/deployment.md)
 - [常见问题](docs/troubleshooting.md)
+- [公开发布前检查清单](docs/release-checklist.md)
 - [Codex Skill 说明](SKILL.md)
 
 ## 快速开始
