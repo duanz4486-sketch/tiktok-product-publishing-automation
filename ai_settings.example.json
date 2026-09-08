@@ -1,0 +1,7 @@
+{
+  "provider_key": "deepseek",
+  "provider": "DeepSeek",
+  "model": "deepseek-v4-flash-vision-exp",
+  "base_url": "https://api.deepseek.com/chat/completions",
+  "language": "zh-CN"
+}

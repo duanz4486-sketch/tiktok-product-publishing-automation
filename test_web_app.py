@@ -6,6 +6,7 @@ import zipfile
 
 import batch_tiktok_collect
 import web_app
+from miaoshou_tool import json_io
 
 
 def test_zip_subset_is_used_as_source_of_truth() -> None:
@@ -26,6 +27,13 @@ def test_zip_subset_is_used_as_source_of_truth() -> None:
     assert len(failures) == 25
     assert failures[0]["seq"] == 6
     assert failures[0]["error"] == "缺少图片文件夹"
+
+
+def test_json_helpers_use_one_compact_safe_format() -> None:
+    payload = {"message": "</script>", "items": [1, "二"]}
+
+    assert json_io.dumps(payload, compact=True) == '{"message":"</script>","items":[1,"二"]}'
+    assert web_app.json_for_html(payload) == '{"message":"<\\/script>","items":[1,"二"]}'
 
 
 def test_saved_account_form_can_edit_key_without_revealing_secret() -> None:
@@ -107,6 +115,9 @@ def test_confirm_page_does_not_render_secrets() -> None:
 
 
 def test_status_labels_and_errors_are_user_friendly() -> None:
+    assert web_app.status_label("ok") == "正常"
+    assert web_app.status_label("warn") == "提醒"
+    assert web_app.status_label("error") == "失败"
     assert web_app.status_label("done_with_errors") == "部分失败"
     assert "部分失败" in web_app.status_badge("done_with_errors")
     assert "图片链接无法读取" in web_app.readable_error_text("HTTPError 404: Not Found")
@@ -195,6 +206,58 @@ def test_batch_endpoints_are_declared() -> None:
     }
 
     assert required <= set(batch_tiktok_collect.ENDPOINTS)
+
+
+def test_release_check_reports_template_batch_readiness() -> None:
+    root = Path(tempfile.mkdtemp())
+    (root / ".env").write_text("OSS_ACCESS_KEY_ID=id\nOSS_ACCESS_KEY_SECRET=secret\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".env\naccounts.json\nai_settings.json\nruns/\nuploads/\n", encoding="utf-8")
+    accounts_path = root / "accounts.json"
+    json_io.write(
+        accounts_path,
+        {
+            "accounts": {
+                "acc": {
+                    "name": "测试妙手账号",
+                    "shop_id": 123,
+                    "app_key": "key",
+                    "app_secret": "secret",
+                    "templates": {"大地毯": 1, "非定制毛毯": 2, "定制毛毯": 3},
+                }
+            }
+        },
+    )
+
+    report = web_app.self_check.run_release_check(root, accounts_path)
+
+    assert report["ok"] is True
+    assert report["summary"]["error"] == 0
+    assert any(item["key"] == "gitignore" and item["status"] == "ok" for item in report["checks"])
+
+
+def test_release_check_flags_missing_miaoshou_templates() -> None:
+    root = Path(tempfile.mkdtemp())
+    (root / ".env").write_text("OSS_ACCESS_KEY_ID=id\nOSS_ACCESS_KEY_SECRET=secret\n", encoding="utf-8")
+    accounts_path = root / "accounts.json"
+    json_io.write(
+        accounts_path,
+        {
+            "accounts": {
+                "acc": {
+                    "name": "测试妙手账号",
+                    "shop_id": 123,
+                    "app_key": "key",
+                    "app_secret": "secret",
+                    "templates": {"大地毯": 1},
+                }
+            }
+        },
+    )
+
+    report = web_app.self_check.run_release_check(root, accounts_path)
+
+    assert report["ok"] is False
+    assert any("非定制毛毯" in item["message"] and item["status"] == "error" for item in report["checks"])
 
 
 def test_flatten_category_tree_keeps_leaf_paths_only() -> None:
@@ -1043,6 +1106,7 @@ def test_single_job_ai_failure_blocks_miaoshou_create() -> None:
 
 if __name__ == "__main__":
     test_zip_subset_is_used_as_source_of_truth()
+    test_json_helpers_use_one_compact_safe_format()
     test_saved_account_form_can_edit_key_without_revealing_secret()
     test_discover_templates_uses_template_keywords_and_shop_id()
     test_confirm_page_does_not_render_secrets()

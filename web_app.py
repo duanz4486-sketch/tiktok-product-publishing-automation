@@ -2,32 +2,32 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, message="'cgi' is deprecated.*")
 import cgi
-import hashlib
-import hmac
 import html
-import json
-import mimetypes
-import os
 import re
 import secrets
 import threading
 import urllib.parse
-import urllib.error
 import urllib.request
 import uuid
-import zipfile
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, VALID_IMAGE_EXTS, natural_key, post as miaoshou_post, read_items, run_batch
+from miaoshou_tool import accounts as account_module
+from miaoshou_tool import ai as ai_module
+from miaoshou_tool import files as file_module
+from miaoshou_tool import json_io
+from miaoshou_tool import miaoshou_api
+from miaoshou_tool import oss_upload
+from miaoshou_tool import publishing as publishing_module
+from miaoshou_tool import rendering
+from miaoshou_tool import self_check
 
 ROOT = Path(__file__).resolve().parent
 UPLOAD_ROOT = ROOT / "uploads"
@@ -99,12 +99,11 @@ DEFAULT_OPERATOR = "网页操作"
 
 
 def e(value: object) -> str:
-    return html.escape("" if value is None else str(value), quote=True)
+    return rendering.escape(value)
 
 
 def alert_html(kind: str, message: object) -> str:
-    text = str(message or "").strip()
-    return f'<div class="alert alert-{e(kind)}">{e(text)}</div>' if text else ""
+    return rendering.alert_html(kind, message)
 
 
 def field_text(form: cgi.FieldStorage, name: str, default: str = "") -> str:
@@ -115,236 +114,79 @@ def field_text(form: cgi.FieldStorage, name: str, default: str = "") -> str:
 
 
 def load_accounts_config() -> dict:
-    load_local_env()
-    if ACCOUNTS_PATH.exists():
-        return json.loads(ACCOUNTS_PATH.read_text(encoding="utf-8"))
-    password = os.getenv("WEB_PASSWORD", "").strip()
-    if not password:
-        return {"accounts": {}}
-    return {
-        "accounts": {
-            "default": {
-                "name": "默认妙手账号",
-                "shop_id": SHOP_ID,
-                "templates": {name: data["detail_id"] for name, data in TEMPLATES.items()},
-            }
-        },
-    }
+    return account_module.load_accounts_config()
 
 
 def save_accounts_config(config: dict) -> None:
-    ACCOUNTS_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    account_module.save_accounts_config(config)
 
 
 def default_template_ids() -> dict[str, int]:
-    return {name: data["detail_id"] for name, data in TEMPLATES.items()}
+    return account_module.default_template_ids()
 
 
 def all_account_ids(config: dict | None = None) -> list[str]:
-    data = config if config is not None else load_accounts_config()
-    return [str(account_id) for account_id in (data.get("accounts") or {}).keys()]
+    return account_module.all_account_ids(config)
 
 
 def user_record(username: str) -> dict | None:
-    for user in load_accounts_config().get("users", []):
-        if str(user.get("username", "")) == username:
-            return user
-    return None
+    return account_module.user_record(username)
 
 
 def user_record_in_config(config: dict, username: str) -> dict | None:
-    for user in config.get("users", []):
-        if str(user.get("username", "")) == username:
-            return user
-    return None
+    return account_module.user_record_in_config(config, username)
 
 
 def allowed_account_ids(user: dict) -> list[str]:
-    if user.get("accounts"):
-        return [str(account_id) for account_id in user["accounts"]]
-    if user.get("account_id"):
-        return [str(user["account_id"])]
-    return []
+    return account_module.allowed_account_ids(user)
 
 
 def clean_prefix(value: str) -> str:
-    return value.strip().replace("\\", "/").strip("/")
+    return file_module.clean_prefix(value)
 
 
 def save_upload(form: cgi.FieldStorage, name: str, target: Path) -> None:
-    field = form[name] if name in form else None
-    if field is None or isinstance(field, list) or not getattr(field, "filename", ""):
-        raise ValueError(f"缺少上传文件: {name}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as out:
-        while True:
-            chunk = field.file.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
+    file_module.save_upload(form, name, target)
 
 
 def safe_upload_relative_path(filename: object) -> Path | None:
-    raw = str(filename or "").replace("\\", "/").strip("/")
-    if not raw:
-        return None
-    path = Path(raw)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError(f"上传文件路径不安全: {filename}")
-    return path
+    return file_module.safe_upload_relative_path(filename)
 
 
 def extract_zip(zip_path: Path, target: Path) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    target_root = target.resolve()
-    with zipfile.ZipFile(zip_path) as archive:
-        for info in archive.infolist():
-            name = info.filename.replace("\\", "/")
-            if not name or name.startswith("/") or "/../" in f"/{name}":
-                raise ValueError(f"ZIP 内有不安全路径: {info.filename}")
-            output = (target / name).resolve()
-            try:
-                output.relative_to(target_root)
-            except ValueError:
-                raise ValueError(f"ZIP 内有不安全路径: {info.filename}")
-            if info.is_dir():
-                output.mkdir(parents=True, exist_ok=True)
-                continue
-            output.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(info) as src, output.open("wb") as dst:
-                dst.write(src.read())
+    file_module.extract_zip(zip_path, target)
 
 
 def stage_batch_images(form: cgi.FieldStorage, upload_dir: Path, image_root: Path) -> tuple[str, list[tuple[Path, str]]]:
-    zip_fields = [field for field in field_list(form, "image_zip") if getattr(field, "filename", "")]
-    folder_fields = [field for field in field_list(form, "image_folder") if getattr(field, "filename", "")]
-
-    if zip_fields:
-        zip_path = upload_dir / "images.zip"
-        original_name = upload_filename(form, "image_zip", "images.zip")
-        save_uploaded_file(zip_fields[0], zip_path)
-        extract_zip(zip_path, image_root)
-        return original_name, [(zip_path, original_name)]
-
-    if not folder_fields:
-        raise ValueError("请上传图片 ZIP 或图片文件夹")
-
-    saved = 0
-    top_names: list[str] = []
-    for field in folder_fields:
-        rel = safe_upload_relative_path(getattr(field, "filename", ""))
-        if rel is None:
-            continue
-        if rel.name.lower() == "thumbs.db" or rel.suffix.lower() not in VALID_IMAGE_EXTS:
-            continue
-        if len(rel.parts) > 1 and rel.parts[0] not in top_names:
-            top_names.append(rel.parts[0])
-        save_uploaded_file(field, image_root / rel)
-        saved += 1
-
-    if not saved:
-        raise ValueError("图片文件夹里没有找到支持的图片文件")
-
-    source_name = top_names[0] if len(top_names) == 1 else "folder-upload"
-    return source_name, []
+    return file_module.stage_batch_images(form, upload_dir, image_root)
 
 
 def load_local_env() -> None:
-    env_path = ROOT / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        os.environ.setdefault(name.strip(), value.strip().strip("\"'"))
+    account_module.load_local_env()
 
 
 def oss_credentials() -> tuple[str, str, str]:
-    load_local_env()
-    key_id = os.getenv("OSS_ACCESS_KEY_ID") or os.getenv("ALIYUN_ACCESS_KEY_ID") or os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID")
-    key_secret = os.getenv("OSS_ACCESS_KEY_SECRET") or os.getenv("ALIYUN_ACCESS_KEY_SECRET") or os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
-    token = os.getenv("OSS_SECURITY_TOKEN") or os.getenv("ALIYUN_SECURITY_TOKEN") or os.getenv("ALIBABA_CLOUD_SECURITY_TOKEN") or ""
-    if not key_id or not key_secret:
-        raise RuntimeError("未配置 OSS 上传密钥。请在本机 .env 或环境变量里配置 OSS_ACCESS_KEY_ID 和 OSS_ACCESS_KEY_SECRET。")
-    return key_id, key_secret, token
+    return oss_upload.oss_credentials()
 
 
 def put_oss_object(file_path: Path, object_key: str) -> None:
-    key_id, key_secret, token = oss_credentials()
-    data = file_path.read_bytes()
-    content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-    now = datetime.now(timezone.utc)
-    oss_date = now.strftime("%Y%m%dT%H%M%SZ")
-    scope_date = now.strftime("%Y%m%d")
-    canonical_uri = "/" + urllib.parse.quote(f"{OSS_BUCKET}/{object_key}", safe="/~")
-    canonical_headers = (
-        f"content-type:{content_type}\n"
-        "x-oss-content-sha256:UNSIGNED-PAYLOAD\n"
-        f"x-oss-date:{oss_date}\n"
-    )
-    if token:
-        canonical_headers += f"x-oss-security-token:{token}\n"
-    hashed_request = hashlib.sha256(
-        f"PUT\n{canonical_uri}\n\n{canonical_headers}\n\nUNSIGNED-PAYLOAD".encode()
-    ).hexdigest()
-    scope = f"{scope_date}/{OSS_REGION}/oss/aliyun_v4_request"
-    string_to_sign = f"OSS4-HMAC-SHA256\n{oss_date}\n{scope}\n{hashed_request}"
-    signing_key = hmac.new(f"aliyun_v4{key_secret}".encode(), scope_date.encode(), hashlib.sha256).digest()
-    signing_key = hmac.new(signing_key, OSS_REGION.encode(), hashlib.sha256).digest()
-    signing_key = hmac.new(signing_key, b"oss", hashlib.sha256).digest()
-    signing_key = hmac.new(signing_key, b"aliyun_v4_request", hashlib.sha256).digest()
-    signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "Authorization": f"OSS4-HMAC-SHA256 Credential={key_id}/{scope},Signature={signature}",
-        "Content-Type": content_type,
-        "x-oss-content-sha256": "UNSIGNED-PAYLOAD",
-        "x-oss-date": oss_date,
-    }
-    if token:
-        headers["x-oss-security-token"] = token
-    url = f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
-    request = urllib.request.Request(url, data=data, headers=headers, method="PUT")
-    with urllib.request.urlopen(request, timeout=60) as response:
-        if response.status not in {200, 201}:
-            raise RuntimeError(f"OSS 上传失败: HTTP {response.status}")
+    oss_upload.put_oss_object(file_path, object_key)
 
 
 def upload_images_to_oss(image_root: Path, image_prefix: str, seqs: list[int]) -> int:
-    count = 0
-    for seq in seqs:
-        folder = image_root / str(seq)
-        if not folder.is_dir():
-            continue
-        for file_path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
-            if not file_path.is_file() or file_path.suffix.lower() not in VALID_IMAGE_EXTS:
-                continue
-            put_oss_object(file_path, f"{image_prefix}/{seq}/{file_path.name}")
-            count += 1
-    return count
+    return oss_upload.upload_images_to_oss(image_root, image_prefix, seqs, put_object=put_oss_object)
 
 
 def upload_source_files_to_oss(image_prefix: str, source_files: list[tuple[Path, str]]) -> int:
-    count = 0
-    for file_path, original_name in source_files:
-        put_oss_object(file_path, f"{image_prefix}/_source/{original_name}")
-        count += 1
-    return count
+    return oss_upload.upload_source_files_to_oss(image_prefix, source_files, put_object=put_oss_object)
 
 
 def upload_filename(form: cgi.FieldStorage, name: str, default: str) -> str:
-    field = form[name] if name in form else None
-    raw_name = getattr(field, "filename", "") if field is not None and not isinstance(field, list) else ""
-    clean_name = Path(str(raw_name).replace("\\", "/")).name
-    return clean_name or default
+    return file_module.upload_filename(form, name, default)
 
 
 def field_list(form: cgi.FieldStorage, name: str) -> list[cgi.FieldStorage]:
-    if name not in form:
-        return []
-    value = form[name]
-    return value if isinstance(value, list) else [value]
+    return file_module.field_list(form, name)
 
 
 def decimal_field(form: cgi.FieldStorage, name: str, label: str, minimum: float | None = None, maximum: float | None = None) -> float:
@@ -376,748 +218,227 @@ def int_field(form: cgi.FieldStorage, name: str, label: str, minimum: int | None
 
 
 def contains_cjk(value: str) -> bool:
-    return bool(re.search(r"[\u3400-\u9fff]", value or ""))
+    return ai_module.contains_cjk(value)
 
 
 def require_english(value: str, label: str) -> None:
-    if contains_cjk(value):
-        raise ValueError(f"{label}需要填写英文，不能包含中文")
+    ai_module.require_english(value, label)
 
 
 def require_ai_description_policy(value: str) -> None:
-    text = re.sub(r"<[^>]+>", " ", value or "")
-    banned = [label for pattern, label in BANNED_AI_DESCRIPTION_PATTERNS if pattern.search(text)]
-    if banned:
-        raise RuntimeError("AI 英文详情描述包含禁用词：" + "、".join(banned))
+    ai_module.require_ai_description_policy(value)
 
 
 def account_credentials(account: dict) -> tuple[str, str]:
-    app_key = str(account.get("app_key") or "").strip()
-    app_secret = str(account.get("app_secret") or "").strip()
-    if not app_key or not app_secret:
-        raise ValueError("这个妙手账号缺少 APP ID / App Key 或 App Secret")
-    return app_key, app_secret
+    return account_module.account_credentials(account)
 
 
 def expect_miaoshou_success(response: dict, label: str) -> dict:
-    if response.get("result") != "success":
-        raise RuntimeError(f"{label}失败: {response}")
-    return response.get("data") or {}
+    return miaoshou_api.expect_miaoshou_success(response, label)
 
 
 def shop_display_name(shop: dict) -> str:
-    name = shop.get("platformShopName") or shop.get("shopNick") or shop.get("shopName") or shop.get("name") or shop.get("shopId")
-    site = shop.get("siteName") or shop.get("site") or SITE
-    return f"{name} ({site})"
+    return miaoshou_api.shop_display_name(shop)
 
 
 def get_tiktok_shops(credentials: tuple[str, str]) -> list[dict]:
-    response = miaoshou_post(
-        "get_shop_list",
-        {"platform": "tiktok", "site": SITE, "pageNo": 1, "pageSize": 100},
-        credentials,
-    )
-    data = expect_miaoshou_success(response, "获取店铺列表")
-    shops = data.get("shopList") or []
-    return [shop for shop in shops if str(shop.get("shopId") or "").isdigit()]
+    return miaoshou_api.get_tiktok_shops(credentials, miaoshou_post)
 
 
 def pick_warehouse(warehouses: list[dict]) -> dict | None:
-    usable = [warehouse for warehouse in warehouses if warehouse.get("warehouseId")]
-    if not usable:
-        return None
-    for warehouse in usable:
-        if truthy_flag(warehouse.get("isDefault")):
-            return warehouse
-    return usable[0]
+    return miaoshou_api.pick_warehouse(warehouses)
 
 
 def get_default_warehouse_ids(shop_ids: list[int], credentials: tuple[str, str]) -> dict[str, str]:
-    response = miaoshou_post("get_shop_warehouse_list", {"shopIds": shop_ids}, credentials)
-    data = expect_miaoshou_success(response, "获取店铺仓库列表")
-    result: dict[str, str] = {}
-    missing: list[str] = []
-    missing_keys: set[str] = set()
-    wanted = {str(value) for value in shop_ids}
-    for shop in data.get("shopWarehouseList") or []:
-        shop_id = str(shop.get("shopId") or "")
-        if shop_id not in wanted:
-            continue
-        warehouse = pick_warehouse(shop.get("warehouseList") or [])
-        if warehouse:
-            result[shop_id] = str(warehouse["warehouseId"])
-        else:
-            missing.append(str(shop.get("shopName") or shop_id))
-            missing_keys.add(shop_id)
-    for shop_id in shop_ids:
-        if str(shop_id) not in result and str(shop_id) not in missing_keys:
-            missing.append(str(shop_id))
-    if missing:
-        raise RuntimeError(f"这些店铺没有可用仓库，请先在妙手店铺里设置默认仓库：{', '.join(missing)}")
-    return result
+    return miaoshou_api.get_default_warehouse_ids(shop_ids, credentials, miaoshou_post)
 
 
 def flatten_category_tree(cate_tree: dict) -> list[dict]:
-    rows: list[dict] = []
-
-    def walk(node: dict, parents: list[str]) -> None:
-        name = str(node.get("nameChinese") or node.get("name") or node.get("cid") or "").strip()
-        path = parents + ([name] if name else [])
-        children = node.get("children") or {}
-        is_leaf = str(node.get("isLastLevel") or "").lower() in {"1", "true", "yes"} or not children
-        if is_leaf and node.get("cid") and not node.get("disabled"):
-            rows.append(
-                {
-                    "cid": str(node["cid"]),
-                    "name": str(node.get("name") or ""),
-                    "nameChinese": str(node.get("nameChinese") or ""),
-                    "path": " / ".join(path),
-                }
-            )
-        for child in (children.values() if isinstance(children, dict) else children):
-            if isinstance(child, dict):
-                walk(child, path)
-
-    for root in (cate_tree.values() if isinstance(cate_tree, dict) else cate_tree):
-        if isinstance(root, dict):
-            walk(root, [])
-    return sorted(rows, key=lambda row: natural_key(row["path"]))
+    return miaoshou_api.flatten_category_tree(cate_tree)
 
 
 def load_categories(credentials: tuple[str, str]) -> list[dict]:
-    cache_key = SITE
     with CATEGORY_CACHE_LOCK:
-        cached = CATEGORY_CACHE.get(cache_key)
-    if cached:
-        return cached
-    response = miaoshou_post("get_tk_category_tree", {"site": SITE}, credentials)
-    data = expect_miaoshou_success(response, "获取 TikTok 类目")
-    rows = flatten_category_tree((data.get("cateTree") or {}))
-    with CATEGORY_CACHE_LOCK:
-        CATEGORY_CACHE[cache_key] = rows
-    return rows
+        return miaoshou_api.load_categories(credentials, miaoshou_post, CATEGORY_CACHE)
 
 
 def get_category_metadata(cid: int, credentials: tuple[str, str], shop_ids: list[int] | None = None) -> dict:
-    body: dict[str, object] = {"cid": cid, "site": SITE}
-    if shop_ids:
-        body["shopIds"] = shop_ids
-    response = miaoshou_post("get_tk_category_metadata", body, credentials)
-    data = expect_miaoshou_success(response, "获取类目参数")
-    return (data.get("categoryMetadata") or {})
+    return miaoshou_api.get_category_metadata(cid, credentials, miaoshou_post, shop_ids)
 
 
 def metadata_attrs(metadata: dict, key: str) -> list[dict]:
-    return [attr for attr in metadata.get(key) or [] if isinstance(attr, dict)]
+    return miaoshou_api.metadata_attrs(metadata, key)
 
 
 def truthy_flag(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    text = str(value or "").strip().lower()
-    return text in {"1", "true", "yes", "y", "required", "mandatory"}
+    return miaoshou_api.truthy_flag(value)
 
 
 def attr_label(attr: dict) -> str:
-    alias = str(attr.get("attributeNameAlias") or "").strip()
-    name = str(attr.get("name") or attr.get("attributeName") or attr.get("attrId") or "").strip()
-    return f"{alias} / {name}" if alias and name and alias != name else (alias or name)
+    return miaoshou_api.attr_label(attr)
 
 
 def is_required_attr(attr: dict) -> bool:
-    required_regions = {str(region or "").strip().upper() for region in (attr.get("requiredRegions") or [])}
-    return truthy_flag(attr.get("isMandatory")) or truthy_flag(attr.get("isRequired")) or SITE.upper() in required_regions
+    return miaoshou_api.is_required_attr(attr)
 
 
 def category_required_notes(metadata: dict) -> list[str]:
-    config = metadata.get("categoryConfig") or {}
-    notes: list[str] = []
-    if truthy_flag(config.get("packageDimensionIsRequired")):
-        notes.append("平台要求填写包装尺寸和重量，已放在后面的「物流/包装信息」分段。")
-    if truthy_flag(config.get("sizeChartIsRequired")) or truthy_flag(config.get("isSizeChartMandatory")):
-        notes.append("这个类目要求尺码表，后续需要补充尺码表入口。")
-    if truthy_flag(config.get("responsiblePersonIsRequired")):
-        notes.append("这个类目要求责任人信息，后续需要补充责任人选择入口。")
-    if truthy_flag(config.get("manufacturerIsRequired")):
-        notes.append("这个类目要求制造商信息，后续需要补充制造商入口。")
-    required_certs = [
-        str(cert.get("name") or cert.get("id") or "").strip()
-        for cert in (config.get("productCertifications") or [])
-        if isinstance(cert, dict) and (truthy_flag(cert.get("isRequired")) or truthy_flag(cert.get("isMandatory")))
-    ]
-    if required_certs:
-        notes.append("这个类目要求产品认证：" + "、".join(required_certs[:5]))
-    return notes
+    return miaoshou_api.category_required_notes(metadata)
 
 
 def save_uploaded_file(field: cgi.FieldStorage, target: Path) -> Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as out:
-        while True:
-            chunk = field.file.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-    return target
+    return file_module.save_uploaded_file(field, target)
 
 
 def uploaded_image_files(form: cgi.FieldStorage, upload_dir: Path) -> list[Path]:
-    staged: list[tuple[str, Path]] = []
-    direct_dir = upload_dir / "direct-images"
-    zip_index = 0
-
-    def stage_field(field: cgi.FieldStorage) -> None:
-        nonlocal zip_index
-        filename = Path(str(getattr(field, "filename", "")).replace("\\", "/")).name
-        suffix = Path(filename).suffix.lower()
-        if not filename:
-            return
-        if suffix == ".zip":
-            zip_index += 1
-            zip_path = upload_dir / f"single-images-{zip_index}.zip"
-            save_uploaded_file(field, zip_path)
-            unzip_dir = upload_dir / f"single-images-{zip_index}"
-            extract_zip(zip_path, unzip_dir)
-            for path in unzip_dir.rglob("*"):
-                if path.is_file() and path.suffix.lower() in VALID_IMAGE_EXTS:
-                    staged.append((path.name, path))
-            return
-        if suffix in VALID_IMAGE_EXTS:
-            target = direct_dir / f"{len(staged) + 1:03d}-{filename}"
-            staged.append((filename, save_uploaded_file(field, target)))
-
-    for name in ("image_upload", "image_files", "image_zip"):
-        for field in field_list(form, name):
-            stage_field(field)
-
-    staged = sorted(staged, key=lambda item: natural_key(item[0]))
-    return [path for _, path in staged[:SINGLE_IMAGE_LIMIT]]
+    return file_module.uploaded_image_files(form, upload_dir)
 
 
 def uploaded_sku_image_files(form: cgi.FieldStorage, upload_dir: Path) -> dict[str, Path]:
-    row_ids = [str(item.value or "").strip() for item in field_list(form, "sku_row_id")]
-    result: dict[str, Path] = {}
-    sku_dir = upload_dir / "sku-images"
-    for index, row_id in enumerate(row_ids):
-        row_id = row_id or str(index)
-        field_name = f"sku_image_file_{row_id}"
-        field = form[field_name] if field_name in form else None
-        if field is None or isinstance(field, list):
-            continue
-        filename = Path(str(getattr(field, "filename", "")).replace("\\", "/")).name
-        if not filename:
-            continue
-        if Path(filename).suffix.lower() not in VALID_IMAGE_EXTS:
-            raise ValueError(f"规格图 {filename} 不是支持的图片格式")
-        result[row_id] = save_uploaded_file(field, sku_dir / f"{index + 1:03d}-{filename}")
-    return result
+    return file_module.uploaded_sku_image_files(form, upload_dir)
 
 
 def uploaded_video_file(form: cgi.FieldStorage, upload_dir: Path) -> Path | None:
-    field = form["main_video"] if "main_video" in form else None
-    if field is None or isinstance(field, list):
-        return None
-    filename = Path(str(getattr(field, "filename", "")).replace("\\", "/")).name
-    if not filename:
-        return None
-    if Path(filename).suffix.lower() not in VALID_VIDEO_EXTS:
-        raise ValueError(f"主图视频 {filename} 不是支持的视频格式")
-    return save_uploaded_file(field, upload_dir / "video" / filename)
+    return file_module.uploaded_video_file(form, upload_dir)
 
 
 def upload_single_images(files: list[Path], object_prefix: str) -> list[str]:
-    def upload_one(file_path: Path) -> str:
-        object_key = f"{object_prefix}/{file_path.name}"
-        put_oss_object(file_path, object_key)
-        return f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
-
-    if len(files) <= 1:
-        return [upload_one(file_path) for file_path in files]
-    with ThreadPoolExecutor(max_workers=min(4, len(files))) as pool:
-        return list(pool.map(upload_one, files))
+    return oss_upload.upload_single_images(files, object_prefix, put_object=put_oss_object)
 
 
 def upload_single_video(file_path: Path | None, object_prefix: str) -> str:
-    if not file_path:
-        return ""
-    object_key = f"{object_prefix}/video/{file_path.name}"
-    put_oss_object(file_path, object_key)
-    return f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
+    return oss_upload.upload_single_video(file_path, object_prefix, put_object=put_oss_object)
 
 
 def load_ai_settings() -> dict:
-    load_local_env()
-    if AI_SETTINGS_PATH.exists():
-        settings = json.loads(AI_SETTINGS_PATH.read_text(encoding="utf-8"))
-    else:
-        settings = {}
-    provider_key = str(settings.get("provider_key") or "").strip().lower()
-    if not provider_key:
-        provider_text = str(settings.get("provider") or "DeepSeek").strip().lower()
-        if "deepseek" in provider_text:
-            provider_key = "deepseek"
-        elif "openai" in provider_text:
-            provider_key = "openai"
-        elif "dashscope" in provider_text or "通义" in provider_text or "百炼" in provider_text or "qwen" in provider_text:
-            provider_key = "dashscope"
-        elif "volc" in provider_text or "火山" in provider_text or "豆包" in provider_text:
-            provider_key = "volcengine"
-        else:
-            provider_key = "custom"
-    if provider_key not in AI_PROVIDER_PRESETS:
-        provider_key = "custom"
-    preset = AI_PROVIDER_PRESETS[provider_key]
-    settings["provider_key"] = provider_key
-    settings["provider"] = preset["label"]
-    settings.setdefault("model", preset["model"])
-    settings.setdefault("language", "zh-CN")
-    settings.setdefault("base_url", preset["base_url"])
-    if str(settings.get("model") or "").lower() == "deepseek-v4-flash-vision-exp":
-        settings["model"] = "deepseek-v4-flash-vision-exp"
-    if not settings.get("api_key"):
-        settings["api_key"] = os.getenv(preset["env"], "").strip() or os.getenv("AI_API_KEY", "").strip()
-    return settings
+    return ai_module.load_ai_settings(load_local_env)
 
 
 def save_ai_settings(settings: dict) -> None:
-    current = load_ai_settings()
-    api_key = settings.pop("api_key", "")
-    provider_key = str(settings.get("provider_key") or current.get("provider_key") or "deepseek").strip().lower()
-    if provider_key not in AI_PROVIDER_PRESETS:
-        provider_key = "custom"
-    settings["provider_key"] = provider_key
-    settings["provider"] = AI_PROVIDER_PRESETS[provider_key]["label"]
-    if api_key:
-        current["api_key"] = api_key
-    elif provider_key != current.get("provider_key"):
-        current["api_key"] = ""
-    current.update(settings)
-    AI_SETTINGS_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    ai_module.save_ai_settings(settings, load_ai_settings)
 
 
 def image_data_url(file_path: Path) -> str:
-    content_type = mimetypes.guess_type(file_path.name)[0] or "image/jpeg"
-    data = base64.b64encode(file_path.read_bytes()).decode("ascii")
-    return f"data:{content_type};base64,{data}"
+    return ai_module.image_data_url(file_path)
 
 
 def attr_prompt_rows(attrs: list[dict]) -> list[dict]:
-    rows: list[dict] = []
-    for attr in attrs:
-        attr_id = str(attr.get("attrId") or "")
-        if not attr_id:
-            continue
-        rows.append(
-            {
-                "attrId": attr_id,
-                "label": attr_label(attr),
-                "required": is_required_attr(attr),
-                "options": [
-                    {
-                        "id": str(item.get("id") or ""),
-                        "name": str(item.get("name") or item.get("valueNameAlias") or ""),
-                    }
-                    for item in (attr.get("values") or [])[:80]
-                    if isinstance(item, dict)
-                ],
-                "customAllowed": truthy_flag(attr.get("isCustomized")) or not attr.get("values"),
-            }
-        )
-    return rows
+    return ai_module.attr_prompt_rows(attrs)
 
 
 def ai_suggestion_prompt(title: str, notes: str, metadata: dict) -> str:
-    attrs = attr_prompt_rows(metadata_attrs(metadata, "categoryProductAttrList"))
-    return (
-        "你是跨境电商 TikTok 商品资料助手。页面提示用中文，但输出到妙手的内容必须是英文。\n"
-        "请根据用户标题、用户描述和产品图片生成可确认的商品建议。\n"
-        "严格规则：\n"
-        "1. 只能填写图片或标题/描述中能明确判断的信息；材质、防滑、机洗、克重、认证等不能确定就留空。\n"
-        "2. 不要编造品牌、认证、安全承诺、功能或材质。\n"
-        "3. description_html 严禁出现 kid、kids、child、children、baby、babies、infant、toddler、newborn、teen、teens、pet、pets；boy、girl、teenager、animal 可以使用。\n"
-        f"4. description_html 必须是英文 HTML；去掉 HTML 标签后至少 {MIN_AI_DESCRIPTION_CHARS} 个英文字符，分成 4-6 个 <p> 段落。\n"
-        "5. attributes 只返回能确定的属性。能匹配 options 时返回 valueId；不能匹配但允许自定义时返回英文 valueName。\n"
-        "6. 只返回 JSON，不要 Markdown，不要解释。\n\n"
-        "JSON 格式："
-        '{"description_html":"<p>English description</p>","attributes":[{"attrId":"...","valueId":"...","valueName":"...","reason":"中文依据"}],"warnings":["中文提醒"]}\n\n'
-        f"用户标题：{title}\n"
-        f"用户描述：{notes or '未填写'}\n"
-        "类目属性清单：\n"
-        f"{json.dumps(attrs[:80], ensure_ascii=False)}"
-    )
+    return ai_module.ai_suggestion_prompt(title, notes, metadata)
 
 
 def extract_json_object(text: str) -> dict:
-    content = text.strip()
-    if content.startswith("```"):
-        content = re.sub(r"^```(?:json)?\s*", "", content)
-        content = re.sub(r"\s*```$", "", content)
-    start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("AI 没有返回可解析的 JSON")
-    return json.loads(content[start : end + 1])
+    return ai_module.extract_json_object(text)
 
 
 def ai_provider_label(settings: dict) -> str:
-    key = str(settings.get("provider_key") or "").strip().lower()
-    if key in AI_PROVIDER_PRESETS:
-        return AI_PROVIDER_PRESETS[key]["label"]
-    return str(settings.get("provider") or "OpenAI 兼容接口").strip() or "OpenAI 兼容接口"
+    return ai_module.ai_provider_label(settings)
 
 
 def normalize_chat_completions_url(base_url: str) -> str:
-    url = str(base_url or "").strip()
-    if not url:
-        return ""
-    return url.rstrip("/") if url.rstrip("/").endswith("/chat/completions") else url.rstrip("/") + "/chat/completions"
+    return ai_module.normalize_chat_completions_url(base_url)
 
 
 def call_openai_compatible_chat(settings: dict, content: list[dict], timeout: int = 90) -> str:
-    provider = ai_provider_label(settings)
-    api_key = str(settings.get("api_key") or "").strip()
-    if not api_key:
-        raise RuntimeError(f"还没有配置 {provider} API Key，请先到 AI 设置页面保存。")
-    model = str(settings.get("model") or "").strip()
-    if not model:
-        raise RuntimeError(f"{provider} 模型名称为空，请到 AI 设置页面填写支持图片识别的模型。")
-    base_url = normalize_chat_completions_url(str(settings.get("base_url") or ""))
-    if not base_url:
-        raise RuntimeError(f"{provider} 接口地址为空，请到 AI 设置页面填写 Chat Completions 地址。")
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": content}],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-    request = urllib.request.Request(
-        base_url,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"AI 服务 HTTP {exc.code}（{provider}）: {detail[:300]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"AI 服务网络请求失败（{provider}）: {exc.reason}") from exc
-    data = json.loads(payload)
-    message = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-    if not message:
-        raise RuntimeError(f"AI 服务没有返回建议内容（{provider}）: {payload[:300]}")
-    return message
+    return ai_module.call_openai_compatible_chat(settings, content, timeout, urllib.request.urlopen)
 
 
 def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: dict) -> dict:
-    settings = load_ai_settings()
-    content: list[dict] = [{"type": "text", "text": ai_suggestion_prompt(title, notes, metadata)}]
-    for file_path in image_files[: min(3, SINGLE_IMAGE_LIMIT)]:
-        content.append({"type": "image_url", "image_url": {"url": image_data_url(file_path), "detail": "low"}})
-    message = call_openai_compatible_chat(settings, content)
-    suggestion = extract_json_object(message)
-    description = str(suggestion.get("description_html") or "").strip()
-    if description:
-        require_english(description, "AI 英文详情描述")
-        require_ai_description_policy(description)
-        if len(re.sub(r"<[^>]+>", " ", description)) < MIN_AI_DESCRIPTION_CHARS:
-            raise RuntimeError(f"AI 英文详情描述少于 {MIN_AI_DESCRIPTION_CHARS} 字符，请重新生成。")
-    cleaned_attrs: list[dict] = []
-    known_attrs = {str(attr.get("attrId") or ""): attr for attr in metadata_attrs(metadata, "categoryProductAttrList")}
-    for item in suggestion.get("attributes") or []:
-        if not isinstance(item, dict):
-            continue
-        attr_id = str(item.get("attrId") or "").strip()
-        if attr_id not in known_attrs:
-            continue
-        value_id = str(item.get("valueId") or "").strip()
-        value_name = str(item.get("valueName") or "").strip()
-        if not value_id and value_name:
-            require_english(value_name, attr_label(known_attrs[attr_id]))
-        if value_id or value_name:
-            cleaned_attrs.append(
-                {
-                    "attrId": attr_id,
-                    "valueId": value_id,
-                    "valueName": value_name,
-                    "reason": str(item.get("reason") or "").strip(),
-                }
-            )
-    return {
-        "description_html": description,
-        "attributes": cleaned_attrs,
-        "warnings": [str(item) for item in (suggestion.get("warnings") or []) if str(item).strip()],
-    }
+    return ai_module.call_ai(title, notes, image_files, metadata, load_ai_settings(), call_openai_compatible_chat)
 
 
 def test_ai_settings(settings: dict) -> None:
-    png_data_url = (
-        "data:image/png;base64,"
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-    )
-    content = [
-        {
-            "type": "text",
-            "text": '请确认你能读取图片并严格只返回 JSON：{"ok":true,"summary":"short English image summary"}',
-        },
-        {"type": "image_url", "image_url": {"url": png_data_url, "detail": "low"}},
-    ]
-    result = extract_json_object(call_openai_compatible_chat(settings, content, timeout=45))
-    if not result.get("ok"):
-        raise RuntimeError("AI 测试没有返回 ok=true，请检查模型是否支持图片识别和 JSON 输出。")
+    ai_module.test_ai_settings(settings, call_openai_compatible_chat)
 
 
 def ai_settings_from_form(form: cgi.FieldStorage) -> dict:
-    provider_key = field_text(form, "provider_key", "deepseek").lower()
-    if provider_key not in AI_PROVIDER_PRESETS:
-        provider_key = "custom"
-    preset = AI_PROVIDER_PRESETS[provider_key]
-    return {
-        "provider_key": provider_key,
-        "provider": preset["label"],
-        "model": field_text(form, "model", preset["model"]),
-        "base_url": field_text(form, "base_url", preset["base_url"]),
-        "language": "zh-CN",
-        "api_key": field_text(form, "api_key"),
-    }
+    return ai_module.ai_settings_from_form(form, field_text)
 
 
 def settings_for_ai_test(posted: dict) -> dict:
-    current = load_ai_settings()
-    if not posted.get("api_key") and posted.get("provider_key") == current.get("provider_key"):
-        posted = dict(posted)
-        posted["api_key"] = current.get("api_key", "")
-    return posted
+    return ai_module.settings_for_ai_test(posted, load_ai_settings())
 
 
 def ai_configured() -> bool:
-    return bool(str(load_ai_settings().get("api_key") or "").strip())
+    return ai_module.ai_configured(load_ai_settings())
 
 
 def merge_ai_attributes(product_attrs: list[dict], suggestion_attrs: list[dict], metadata: dict) -> list[dict]:
-    result = list(product_attrs)
-    existing_ids = {str(item.get("attributeId") or "") for item in result}
-    metadata_by_id = {str(attr.get("attrId") or ""): attr for attr in metadata_attrs(metadata, "categoryProductAttrList")}
-    for item in suggestion_attrs:
-        attr_id = str(item.get("attrId") or "").strip()
-        if not attr_id or attr_id in existing_ids or attr_id not in metadata_by_id:
-            continue
-        attr = metadata_by_id[attr_id]
-        value_id = str(item.get("valueId") or "").strip()
-        value_name = str(item.get("valueName") or "").strip()
-        if value_id:
-            for option in attr.get("values") or []:
-                if str(option.get("id") or "") == value_id:
-                    value_name = str(option.get("name") or option.get("valueNameAlias") or value_name or value_id)
-                    break
-        if not value_name:
-            continue
-        require_english(value_name, attr_label(attr))
-        result.append(
-            {
-                "attributeId": attr_id,
-                "attributeName": str(attr.get("name") or attr.get("attributeName") or ""),
-                "attributeNameAlias": str(attr.get("attributeNameAlias") or ""),
-                "attributeValues": [{"valueName": value_name, "valueId": value_id}],
-            }
-        )
-        existing_ids.add(attr_id)
-    return result
+    return ai_module.merge_ai_attributes(product_attrs, suggestion_attrs, metadata)
 
 
 def build_common_single_product(item_num: str, credentials: tuple[str, str], title: str, notes: str, image_urls: list[str], skus: list[dict], spec_name: str, weight: float, package_length: float, package_width: float, package_height: float, video_url: str = "") -> int:
-    first_sku = skus[0]
-    color_map = {
-        sku["value_id"]: {"name": sku["value"], "imgUrl": sku["image_url"], "imgUrls": [sku["image_url"]]}
-        for sku in skus
-    }
-    sku_map = {
-        f";{sku['value_id']};": {
-            "itemNum": sku["item_num"],
-            "price": sku["price"],
-            "stock": sku["stock"],
-            "weight": weight,
-            "packageLength": package_length,
-            "packageWidth": package_width,
-            "packageHeight": package_height,
-            "oriPrice": sku["price"],
-            "oriStock": sku["stock"],
-        }
-        for sku in skus
-    }
-    body = {
-            "title": title,
-            "itemNum": item_num,
-            "notesText": re.sub(r"<[^>]+>", " ", notes)[:65536],
-            "notes": notes,
-            "sourceAttrs": [],
-            "price": first_sku["price"],
-            "stock": sum(sku["stock"] for sku in skus),
-            "imgUrls": image_urls,
-            "weight": max(weight, 0.01),
-            "packageLength": package_length,
-            "packageWidth": package_width,
-            "packageHeight": package_height,
-            "colorPropName": spec_name,
-            "colorMap": color_map,
-            "skuMap": sku_map,
-        }
-    if video_url:
-        body["mainImgVideoUrl"] = video_url
-    response = miaoshou_post("create_common_collect_product", body, credentials)
-    data = expect_miaoshou_success(response, "创建公共采集箱产品")
-    return int(data["commonCollectBoxDetailId"])
+    return publishing_module.build_common_single_product(
+        item_num,
+        credentials,
+        title,
+        notes,
+        image_urls,
+        skus,
+        spec_name,
+        weight,
+        package_length,
+        package_width,
+        package_height,
+        miaoshou_post,
+        video_url,
+    )
 
 
 def build_product_attributes(form: cgi.FieldStorage, metadata: dict) -> list[dict]:
-    attrs = metadata_attrs(metadata, "categoryProductAttrList")
-    result: list[dict] = []
-    for attr in attrs:
-        attr_id = str(attr.get("attrId") or "")
-        if not attr_id:
-            continue
-        selected = field_text(form, f"attr_{attr_id}")
-        custom = field_text(form, f"attr_custom_{attr_id}")
-        if custom:
-            require_english(custom, attr_label(attr))
-            values = [{"valueName": custom, "valueId": ""}]
-        elif selected:
-            value_name = selected
-            value_id = ""
-            for item in attr.get("values") or []:
-                if str(item.get("id")) == selected:
-                    value_id = str(item.get("id") or "")
-                    value_name = str(item.get("name") or item.get("valueNameAlias") or selected)
-                    break
-            values = [{"valueName": value_name, "valueId": value_id}]
-        else:
-            if is_required_attr(attr):
-                raise ValueError(f"请填写必填属性：{attr_label(attr)}")
-            continue
-        result.append(
-            {
-                "attributeId": attr_id,
-                "attributeName": str(attr.get("name") or attr.get("attributeName") or ""),
-                "attributeNameAlias": str(attr.get("attributeNameAlias") or ""),
-                "attributeValues": values,
-            }
-        )
-    return result
+    return publishing_module.build_product_attributes(form, metadata, field_text)
 
 
 def custom_value_id(index: int) -> str:
-    return str(900000000000000000 + index)
+    return publishing_module.custom_value_id(index)
 
 
 def get_site_info(detail_id: int, credentials: tuple[str, str]) -> tuple[str, dict]:
-    response = miaoshou_post("get_tk_site_collect_item_info", {"detailId": detail_id, "site": SITE}, credentials)
-    data = expect_miaoshou_success(response, "获取 TikTok 站点详情")
-    return str(data.get("ossMd5") or ""), data.get("siteCollectItemInfo") or {}
+    return publishing_module.get_site_info(detail_id, credentials, miaoshou_post)
 
 
 def save_site_product(detail_id: int, credentials: tuple[str, str], site_info: dict, oss_md5: str, title: str, notes: str, image_urls: list[str], cid: int, product_attrs: list[dict], sale_attr_id: str, spec_name: str, skus: list[dict], shop_ids: list[int], weight: float, package_length: float, package_width: float, package_height: float, warehouse_ids: dict[str, str] | None = None, video_url: str = "") -> None:
-    if not oss_md5:
-        raise RuntimeError("TikTok 站点详情缺少 ossMd5")
-    warehouse_ids = warehouse_ids or {}
-    sku_property_list = [
-        {
-            "attrName": spec_name,
-            "attrId": sale_attr_id,
-            "attrValueList": [
-                {"attrValueId": sku["value_id"], "attrValue": sku["value"], "imgUrl": sku["image_url"]}
-                for sku in skus
-            ],
-        }
-    ]
-    sku_map = {
-        f";{sku['value_id']};": {
-            "price": sku["price"],
-            "priceIncludeVat": sku["price"],
-            "originPrice": sku["price"],
-            "stock": sku["stock"],
-            "itemNum": sku["item_num"],
-            "isDelete": "0",
-            "weight": weight,
-            "preSale": {"type": "NONE"},
-            "shopIdToWarehouseIdAndStockMap": {
-                shop_id: {warehouse_id: str(sku["stock"])}
-                for shop_id, warehouse_id in warehouse_ids.items()
-            },
-        }
-        for sku in skus
-    }
-    info = dict(site_info)
-    info.pop("sizeChart", None)
-    info.pop("sizeChartType", None)
-    info.pop("sizeChartTemplateId", None)
-    info.pop("collectBoxDetailShopList", None)
-    info.pop("shopId", None)
-    info.update(
-        {
-            "site": SITE,
-            "detailId": detail_id,
-            "title": title,
-            "notes": notes,
-            "imgUrls": image_urls,
-            "weight": weight,
-            "packageLength": package_length,
-            "packageWidth": package_width,
-            "packageHeight": package_height,
-            "isCodOpen": "0",
-            "cid": str(cid),
-            "editModel": "site",
-            "deliveryOptionSetType": "default",
-            "skuMap": sku_map,
-            "skuPropertyList": sku_property_list,
-            "productAttributes": product_attrs,
-            "collectBoxDetailShopList": [{"shopId": shop_id, "site": SITE} for shop_id in shop_ids],
-        }
-    )
-    if video_url:
-        info["mainImgVideoUrl"] = video_url
-    response = miaoshou_post(
-        "save_tk_site_collect_item_info",
-        {"ossMd5": oss_md5, "site": SITE, "detailId": detail_id, "siteCollectItemInfo": info},
+    publishing_module.save_site_product(
+        detail_id,
         credentials,
+        site_info,
+        oss_md5,
+        title,
+        notes,
+        image_urls,
+        cid,
+        product_attrs,
+        sale_attr_id,
+        spec_name,
+        skus,
+        shop_ids,
+        weight,
+        package_length,
+        package_width,
+        package_height,
+        miaoshou_post,
+        warehouse_ids,
+        video_url,
     )
-    expect_miaoshou_success(response, "保存 TikTok 站点详情")
 
 
 def claim_tiktok_to_shops(detail_id: int, shop_ids: list[int], credentials: tuple[str, str]) -> None:
-    response = miaoshou_post("claim_tk_collect_to_shop", {"shopIds": shop_ids, "detailIds": [detail_id]}, credentials)
-    expect_miaoshou_success(response, "认领预发布店铺")
+    publishing_module.claim_tiktok_to_shops(detail_id, shop_ids, credentials, miaoshou_post)
 
 
 def claim_common_to_tiktok_single(common_id: int, credentials: tuple[str, str]) -> int:
-    response = miaoshou_post(
-        "claim_common_products_to_platform",
-        {"detailSerialNumberPlatformList": [{"detailId": common_id, "platform": "tiktok", "serialNumber": 1}]},
-        credentials,
-    )
-    data = expect_miaoshou_success(response, "认领到 TikTok")
-    mapping = (data.get("platformCollectBoxDetailIdMap") or {}).get("tiktok") or {}
-    detail_id = mapping.get(str(common_id)) or mapping.get(common_id)
-    if not detail_id:
-        raise RuntimeError(f"认领成功但没有返回 TikTok detailId: {response}")
-    return int(detail_id)
+    return publishing_module.claim_common_to_tiktok_single(common_id, credentials, miaoshou_post)
 
 
 def delete_common_collect_products(detail_ids: list[int], credentials: tuple[str, str]) -> None:
-    if not detail_ids:
-        return
-    response = miaoshou_post("delete_common_collect_products", {"commonCollectBoxDetailIds": detail_ids}, credentials)
-    expect_miaoshou_success(response, "删除公共采集箱草稿")
+    publishing_module.delete_common_collect_products(detail_ids, credentials, miaoshou_post)
 
 
 def delete_tiktok_collect_products(detail_ids: list[int], credentials: tuple[str, str]) -> None:
-    if not detail_ids:
-        return
-    response = miaoshou_post("delete_tk_collect_products", {"detailIds": detail_ids}, credentials)
-    expect_miaoshou_success(response, "删除 TikTok 采集箱草稿")
+    publishing_module.delete_tiktok_collect_products(detail_ids, credentials, miaoshou_post)
 
 
 def cleanup_created_single_product(common_id: int | None, detail_id: int | None, credentials: tuple[str, str]) -> list[str]:
@@ -1136,53 +457,11 @@ def cleanup_created_single_product(common_id: int | None, detail_id: int | None,
 
 
 def resolve_skus(sku_rows: list[dict], image_urls: list[str], weight: float) -> list[dict]:
-    skus: list[dict] = []
-    for row in sku_rows:
-        image_url = row.get("image_url") or image_urls[0]
-        skus.append(
-            {
-                "value": row["value"],
-                "value_id": custom_value_id(len(skus) + 1),
-                "price": row["price"],
-                "stock": row["stock"],
-                "image_url": image_url,
-                "item_num": f"SKU-{datetime.now().strftime('%Y%m%d%H%M%S')}-{len(skus) + 1}",
-                "weight": weight,
-            }
-        )
-    return skus
+    return publishing_module.resolve_skus(sku_rows, image_urls, weight)
 
 
 def parse_sku_rows(form: cgi.FieldStorage, sku_image_paths: dict[str, Path] | None = None) -> tuple[str, str, list[dict]]:
-    sku_image_paths = sku_image_paths or {}
-    spec_name = field_text(form, "spec_name")
-    sale_attr_id = field_text(form, "sale_attr_id")
-    if not spec_name:
-        raise ValueError("请填写规格名称")
-    require_english(spec_name, "规格名称")
-    row_ids = [str(item.value or "").strip() for item in field_list(form, "sku_row_id")]
-    values = [str(item.value or "").strip() for item in field_list(form, "sku_value")]
-    prices = [str(item.value or "").strip() for item in field_list(form, "sku_price")]
-    stocks = [str(item.value or "").strip() for item in field_list(form, "sku_stock")]
-    rows: list[dict] = []
-    for index, value in enumerate(values):
-        if not value:
-            continue
-        row_id = row_ids[index] if index < len(row_ids) and row_ids[index] else str(index)
-        require_english(value, "规格值")
-        try:
-            price = float(prices[index]) if index < len(prices) and prices[index] else 0
-            stock = int(stocks[index]) if index < len(stocks) and stocks[index] else 0
-        except ValueError:
-            raise ValueError(f"规格「{value}」价格或库存格式不正确")
-        if price <= 0:
-            raise ValueError(f"规格「{value}」价格必须大于 0")
-        if stock < 0:
-            raise ValueError(f"规格「{value}」库存不能小于 0")
-        rows.append({"value": value, "price": price, "stock": stock, "image_path": sku_image_paths.get(row_id)})
-    if not rows:
-        raise ValueError("至少填写一个规格值")
-    return sale_attr_id, spec_name, rows
+    return publishing_module.parse_sku_rows(form, field_text, field_list, sku_image_paths)
 
 
 def run_single_job(job_id: str, params: dict) -> None:
@@ -1288,7 +567,7 @@ def run_single_job(job_id: str, params: dict) -> None:
             result["cleanupErrors"] = cleanup_errors
     log_path = RUN_ROOT / f"single_{job_id}.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(json.dumps({"summary": result, "results": [result]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_io.write(log_path, json_io.job_log(result, [result]))
     set_job(
         job_id,
         status="done" if result["status"] == "success" else "failed",
@@ -1307,74 +586,23 @@ def start_single_job(job_id: str, params: dict) -> None:
 
 
 def image_seq_dirs(folder: Path) -> set[int]:
-    found: set[int] = set()
-    for path in folder.iterdir():
-        if path.is_dir() and path.name.isdigit():
-            found.add(int(path.name))
-    return found
+    return file_module.image_seq_dirs(folder)
 
 
 def image_count_for_seq(image_root: Path, seq: int) -> int:
-    folder = image_root / str(seq)
-    if not folder.is_dir():
-        return 0
-    return sum(1 for path in folder.iterdir() if path.is_file() and path.suffix.lower() in VALID_IMAGE_EXTS)
+    return file_module.image_count_for_seq(image_root, seq)
 
 
 def build_preflight_failures(items: list[dict], image_root: Path, image_seqs: set[int], include_image_only: bool) -> list[dict]:
-    excel_seqs = [int(item["seq"]) for item in items]
-    excel_seq_set = set(excel_seqs)
-    failures = [
-        {"seq": seq, "title": item["title"], "status": "failed", "image_count": 0, "error": "缺少图片文件夹"}
-        for item in items
-        for seq in [int(item["seq"])]
-        if seq not in image_seqs
-    ]
-    if include_image_only:
-        failures.extend(
-            {
-                "seq": seq,
-                "title": "",
-                "status": "failed",
-                "image_count": image_count_for_seq(image_root, seq),
-                "error": "缺少标题",
-            }
-            for seq in sorted(image_seqs - excel_seq_set)
-        )
-    return failures
+    return file_module.build_preflight_failures(items, image_root, image_seqs, include_image_only)
 
 
 def find_image_base(image_root: Path, seqs: list[int]) -> Path | None:
-    needed = set(seqs)
-    candidates = [image_root] + [p for p in image_root.rglob("*") if p.is_dir() and p.name != "__MACOSX"]
-    best: tuple[int, Path] | None = None
-    for folder in candidates:
-        score = len(image_seq_dirs(folder) & needed)
-        if score and (best is None or score > best[0]):
-            best = (score, folder)
-        if score == len(needed):
-            return folder
-    return best[1] if best else None
+    return file_module.find_image_base(image_root, seqs)
 
 
 def resolve_image_layout(image_root: Path, batch: str, seqs: list[int], image_prefix: str = "") -> tuple[Path, str]:
-    image_prefix = clean_prefix(image_prefix)
-    dirs = [p for p in image_root.iterdir() if p.is_dir() and p.name != "__MACOSX"]
-    base = find_image_base(image_root, seqs)
-    if not base:
-        names = "、".join(p.name for p in dirs[:8]) or "空"
-        raise ValueError(f"ZIP 顶层应是一个图片目录，或直接是 1、2、3 这些序号文件夹；当前是：{names}")
-    if image_prefix:
-        prefix = image_prefix
-    elif base == image_root:
-        prefix = batch
-    else:
-        try:
-            prefix = base.relative_to(image_root).parts[0]
-        except ValueError:
-            prefix = batch
-
-    return base, prefix
+    return file_module.resolve_image_layout(image_root, batch, seqs, image_prefix)
 
 
 def set_job(job_id: str, **values) -> None:
@@ -1408,27 +636,15 @@ def progress_html(job: dict) -> str:
   </div>"""
 
 
-STATUS_LABELS = {
-    "queued": "排队中",
-    "uploading": "上传图片",
-    "ai_processing": "AI识别中",
-    "running": "处理中",
-    "started": "已开始",
-    "done": "已完成",
-    "done_with_errors": "部分失败",
-    "failed": "失败",
-    "success": "成功",
-    "dry_run_ok": "预检通过",
-}
+STATUS_LABELS = rendering.STATUS_LABELS
 
 
 def status_label(status: object) -> str:
-    return STATUS_LABELS.get(str(status or ""), str(status or "未知"))
+    return rendering.status_label(status)
 
 
 def status_badge(status: object) -> str:
-    raw = str(status or "unknown")
-    return f'<span class="badge status {e(raw)}">{e(status_label(raw))}</span>'
+    return rendering.status_badge(status)
 
 
 def readable_error_text(error: object) -> str:
@@ -1614,19 +830,19 @@ def run_job(job_id: str, params: dict) -> None:
                 "logPath": str(log_path.resolve()),
             }
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_text(json.dumps({"summary": summary, "results": preflight_failures}, ensure_ascii=False, indent=2), encoding="utf-8")
+            json_io.write(log_path, json_io.job_log(summary, preflight_failures))
             set_job(job_id, status="done_with_errors", summary=summary, log_path=summary["logPath"])
             return
         set_job(job_id, status="running", started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         summary = run_batch(progress=progress, **params)
         if preflight_failures:
             log_path = Path(summary["logPath"])
-            data = json.loads(log_path.read_text(encoding="utf-8"))
+            data = json_io.read(log_path, {}) or {}
             data["results"] = preflight_failures + (data.get("results") or [])
             summary["total"] = len(data["results"])
             summary["failed"] = preflight_failures + (summary.get("failed") or [])
             data["summary"] = summary
-            log_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            json_io.write(log_path, data)
         status = "done" if not summary["failed"] else "done_with_errors"
         set_job(job_id, status=status, summary=summary, log_path=summary["logPath"])
     except Exception as exc:
@@ -1952,9 +1168,9 @@ def render_page(title: str, body: str, refresh: bool = False, header_right: str 
     .progress-meta {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: var(--text-soft); font-size: 12px; }}
     .progress-meta span {{ padding: 3px 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }}
     .badge {{ display: inline-flex; align-items: center; min-height: 24px; padding: 3px 9px; border-radius: 999px; font-weight: 800; font-size: 12px; white-space: nowrap; }}
-    .badge.done, .badge.success, .badge.dry_run_ok {{ color: var(--ok); background: var(--ok-soft); }}
-    .badge.running, .badge.started, .badge.uploading, .badge.queued {{ color: var(--warn); background: var(--warn-soft); }}
-    .badge.failed, .badge.done_with_errors {{ color: var(--bad); background: var(--bad-soft); }}
+    .badge.done, .badge.success, .badge.dry_run_ok, .badge.ok {{ color: var(--ok); background: var(--ok-soft); }}
+    .badge.running, .badge.started, .badge.uploading, .badge.queued, .badge.warn {{ color: var(--warn); background: var(--warn-soft); }}
+    .badge.failed, .badge.done_with_errors, .badge.error {{ color: var(--bad); background: var(--bad-soft); }}
     .table-wrap {{ width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }}
     .table-wrap table {{ min-width: 860px; }}
     th {{ color: #425466; background: #f6f9fc; font-size: 12px; text-transform: none; }}
@@ -2021,35 +1237,11 @@ def render_page(title: str, body: str, refresh: bool = False, header_right: str 
 
 
 def render_account_menu(username: str | None, account_count: int) -> str:
-    display_name = "团队工作台"
-    return f"""
-<details class="account">
-  <summary aria-label="账户">
-    <span class="avatar">MS</span>
-    <span class="account-summary-text"><strong>{display_name}</strong><small>{e(account_count)} 个妙手账号</small></span>
-  </summary>
-  <div class="account-panel">
-    <p class="account-name">{display_name}</p>
-    <p class="account-meta">可用妙手账号：{e(account_count)}</p>
-    <a class="account-link" href="/">模板批量上传</a>
-    <a class="account-link" href="/single">单产品智能上传</a>
-    <a class="account-link" href="/ai-settings">AI 设置</a>
-    <a class="account-link" href="/accounts">妙手账号管理</a>
-  </div>
-</details>"""
+    return rendering.account_menu(account_count)
 
 
 def render_top_nav(current: str = "batch") -> str:
-    def nav_class(name: str) -> str:
-        return ' class="active"' if current == name else ""
-
-    return f"""
-<nav class="top-nav">
-  <a href="/"{nav_class("batch")}>模板批量上传</a>
-  <a href="/single"{nav_class("single")}>单产品智能上传</a>
-  <a href="/accounts"{nav_class("accounts")}>妙手账号管理</a>
-  <a href="/ai-settings"{nav_class("ai")}>AI 设置</a>
-</nav>"""
+    return rendering.top_nav(current)
 
 
 def render_setup_needed() -> bytes:
@@ -2057,9 +1249,56 @@ def render_setup_needed() -> bytes:
 <section>
   <h2>还没有配置妙手账号</h2>
   <p class="hint">请先进入「妙手账号管理」新增妙手账号。真实妙手密钥只保存在本机 accounts.json，不要放进 GitHub。</p>
-  <p><a href="/accounts">去配置妙手账号</a></p>
+  <p><a href="/accounts">去配置妙手账号</a>　<a href="/check">查看系统自检</a></p>
 </section>"""
     return render_page("需要配置", body)
+
+
+def render_release_check(username: str) -> bytes:
+    report = self_check.run_release_check(ROOT, ACCOUNTS_PATH)
+    summary = report["summary"]
+    rows = "".join(
+        f"""<tr>
+          <td>{status_badge(item["status"])}</td>
+          <td>{e(item["label"])}</td>
+          <td>{e(item["message"])}</td>
+          <td>{e(item.get("fix") or "无需处理")}</td>
+        </tr>"""
+        for item in report["checks"]
+    )
+    overall = "success" if report["ok"] else "error"
+    overall_text = "基础配置可以运行模板批量上传。" if report["ok"] else "还有必需配置未完成，请先处理红色失败项。"
+    body = f"""
+{render_top_nav("check")}
+<section>
+  <div class="section-head">
+    <div>
+      <h2>系统自检</h2>
+      <p class="section-kicker">用于公开部署或换电脑部署后，快速确认模板批量上传入口是否准备好。</p>
+    </div>
+  </div>
+  {alert_html(overall, overall_text)}
+  <div class="progress-meta">
+    <span>正常 {e(summary["ok"])}</span>
+    <span>提醒 {e(summary["warn"])}</span>
+    <span>失败 {e(summary["error"])}</span>
+  </div>
+</section>
+<section>
+  <div class="section-head">
+    <div>
+      <h2>检查结果</h2>
+      <p class="section-kicker">自检只检查配置是否齐全，不会调用妙手创建产品，也不会显示任何密钥明文。</p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>状态</th><th>项目</th><th>结果</th><th>处理方式</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</section>"""
+    return render_page("系统自检", body, header_right=render_account_menu(username, len(all_account_ids())))
 
 
 def render_account_row(account_id: str, account: dict) -> str:
@@ -2521,7 +1760,7 @@ def render_attr_control(attr: dict) -> str:
 
 
 def json_for_html(data: object) -> str:
-    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    return rendering.json_for_html(data)
 
 
 def selected_category_path(categories: list[dict], cid: str) -> str:
@@ -2700,7 +1939,7 @@ def render_single(username: str, query: dict[str, list[str]] | None = None, erro
         for attr in sale_attrs
         if attr.get("attrId")
     ]
-    sale_attr_pairs_json = json.dumps(sale_attr_pairs, ensure_ascii=False)
+    sale_attr_pairs_json = json_for_html(sale_attr_pairs)
     sale_attr_note = ""
     if sale_attrs:
         sale_attr_note = '<p class="section-kicker">规格名称可以选择妙手返回的选项，也可以自己输入。页面只需要维护一组销售规格。</p>'
@@ -3007,7 +2246,7 @@ def render_ai_settings(username: str, message: str = "", error: str = "") -> byt
   </form>
 </section>
 <script>
-const aiPresets = {json.dumps(preset_public, ensure_ascii=False)};
+const aiPresets = {json_for_html(preset_public)};
 const providerSelect = document.getElementById('provider_key');
 const modelInput = document.getElementById('model');
 const baseUrlInput = document.getElementById('base_url');
@@ -3059,7 +2298,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def send_json(self, payload: dict, status: int = 200) -> None:
-        content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        content = json_io.dumps(payload, compact=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
@@ -3074,6 +2313,9 @@ class Handler(BaseHTTPRequestHandler):
         username = DEFAULT_OPERATOR
         if parsed.path == "/":
             self.send_html(render_home(username))
+            return
+        if parsed.path == "/check":
+            self.send_html(render_release_check(username))
             return
         if parsed.path == "/single":
             self.send_html(render_single(username, parse_qs(parsed.query)))
