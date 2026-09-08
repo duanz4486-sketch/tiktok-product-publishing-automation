@@ -19,86 +19,38 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, VALID_IMAGE_EXTS, natural_key, post as miaoshou_post, read_items, run_batch
+from miaoshou_tool import account_pages
 from miaoshou_tool import accounts as account_module
 from miaoshou_tool import ai as ai_module
+from miaoshou_tool import config as config_module
 from miaoshou_tool import errors as error_module
 from miaoshou_tool import files as file_module
 from miaoshou_tool import forms as form_module
+from miaoshou_tool import jobs as job_module
 from miaoshou_tool import json_io
 from miaoshou_tool import miaoshou_api
 from miaoshou_tool import oss_upload
 from miaoshou_tool import publishing as publishing_module
 from miaoshou_tool import rendering
 from miaoshou_tool import self_check
+from miaoshou_tool import single_product as single_product_module
 from miaoshou_tool import text as text_module
 
-ROOT = Path(__file__).resolve().parent
-UPLOAD_ROOT = ROOT / "uploads"
-RUN_ROOT = ROOT / "runs"
-ACCOUNTS_PATH = ROOT / "accounts.json"
-AI_SETTINGS_PATH = ROOT / "ai_settings.json"
-OSS_BUCKET = "duanhah-miaoshou-picture"
-OSS_ENDPOINT = "oss-cn-shenzhen.aliyuncs.com"
-OSS_REGION = "cn-shenzhen"
-JOBS: dict[str, dict] = {}
-JOBS_LOCK = threading.Lock()
-ACTIVE_STATUSES = {"queued", "uploading", "ai_processing", "running"}
+ROOT = config_module.ROOT
+UPLOAD_ROOT = config_module.UPLOAD_ROOT
+RUN_ROOT = config_module.RUN_ROOT
+ACCOUNTS_PATH = config_module.ACCOUNTS_PATH
+JOBS = job_module.JOBS
+JOBS_LOCK = job_module.JOBS_LOCK
+ACTIVE_STATUSES = job_module.ACTIVE_STATUSES
 PENDING_ACCOUNTS: dict[str, dict] = {}
 PENDING_ACCOUNTS_LOCK = threading.Lock()
 CATEGORY_CACHE: dict[str, list[dict]] = {}
 CATEGORY_CACHE_LOCK = threading.Lock()
-SINGLE_IMAGE_LIMIT = 9
-VALID_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm"}
-MIN_AI_DESCRIPTION_CHARS = 1000
-AI_PROVIDER_PRESETS = {
-    "deepseek": {
-        "label": "DeepSeek",
-        "model": "deepseek-v4-flash-vision-exp",
-        "base_url": "https://api.deepseek.com/chat/completions",
-        "env": "DEEPSEEK_API_KEY",
-        "help": "适合当前流程，已支持 OpenAI 兼容和图片输入。",
-    },
-    "openai": {
-        "label": "OpenAI",
-        "model": "gpt-4.1-mini",
-        "base_url": "https://api.openai.com/v1/chat/completions",
-        "env": "OPENAI_API_KEY",
-        "help": "需要服务器能访问 OpenAI，并选择支持图片识别的模型。",
-    },
-    "dashscope": {
-        "label": "阿里云百炼 / 通义千问",
-        "model": "qwen-vl-max",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        "env": "DASHSCOPE_API_KEY",
-        "help": "API Key 必须和接口地域匹配；如使用专属工作空间，请改接口地址。",
-    },
-    "volcengine": {
-        "label": "火山方舟 / 豆包",
-        "model": "doubao-1.5-vision-pro-32k",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-        "env": "ARK_API_KEY",
-        "help": "通常需要填写火山方舟实际模型名或推理接入点 ID。",
-    },
-    "custom": {
-        "label": "自定义 OpenAI 兼容接口",
-        "model": "",
-        "base_url": "",
-        "env": "AI_API_KEY",
-        "help": "用于第三方中转或其他兼容服务，需自行填写接口地址和模型名。",
-    },
-}
-BANNED_AI_DESCRIPTION_PATTERNS = [
-    (re.compile(r"\bkids?\b", re.I), "kid/kids"),
-    (re.compile(r"\bchild(?:ren)?\b", re.I), "child/children"),
-    (re.compile(r"\bbab(?:y|ies)\b", re.I), "baby/babies"),
-    (re.compile(r"\binfants?\b", re.I), "infant/infants"),
-    (re.compile(r"\btoddlers?\b", re.I), "toddler/toddlers"),
-    (re.compile(r"\bnewborns?\b", re.I), "newborn/newborns"),
-    (re.compile(r"\bteens?\b", re.I), "teen/teens"),
-    (re.compile(r"\bpets?\b", re.I), "pet/pets"),
-]
-SITE = "US"
-DEFAULT_OPERATOR = "网页操作"
+SINGLE_IMAGE_LIMIT = config_module.SINGLE_IMAGE_LIMIT
+AI_PROVIDER_PRESETS = ai_module.AI_PROVIDER_PRESETS
+DEFAULT_OPERATOR = config_module.DEFAULT_OPERATOR
+SITE = config_module.SITE
 
 
 e = rendering.escape
@@ -323,18 +275,13 @@ def delete_tiktok_collect_products(detail_ids: list[int], credentials: tuple[str
 
 
 def cleanup_created_single_product(common_id: int | None, detail_id: int | None, credentials: tuple[str, str]) -> list[str]:
-    errors: list[str] = []
-    if detail_id is not None:
-        try:
-            delete_tiktok_collect_products([detail_id], credentials)
-        except Exception as exc:
-            errors.append(f"TikTok 草稿删除失败：{exc!r}")
-    if common_id is not None:
-        try:
-            delete_common_collect_products([common_id], credentials)
-        except Exception as exc:
-            errors.append(f"公共采集箱草稿删除失败：{exc!r}")
-    return errors
+    return single_product_module.cleanup_created_single_product(
+        common_id,
+        detail_id,
+        credentials,
+        delete_tiktok_collect_products,
+        delete_common_collect_products,
+    )
 
 
 resolve_skus = publishing_module.resolve_skus
@@ -345,124 +292,32 @@ def parse_sku_rows(form: cgi.FieldStorage, sku_image_paths: dict[str, Path] | No
 
 
 def run_single_job(job_id: str, params: dict) -> None:
-    result: dict[str, object] = {"seq": "单品", "status": "started", "image_count": len(params["image_files"])}
-    common_id: int | None = None
-    detail_id: int | None = None
-    try:
-        set_job(job_id, status="uploading")
-        image_urls = upload_single_images(params["image_files"], params["image_prefix"])
-        video_url = upload_single_video(params.get("video_file"), params["image_prefix"])
-        for row in params["sku_rows"]:
-            sku_image_path = row.get("image_path")
-            if sku_image_path:
-                row["image_url"] = upload_single_images([sku_image_path], f"{params['image_prefix']}/sku")[0]
-        set_job(job_id, uploaded_count=len(image_urls))
-        skus = resolve_skus(params["sku_rows"], image_urls, params["weight"])
-        notes = params["notes"]
-        product_attrs = list(params["product_attrs"])
-        ai_status: dict[str, object] = {"status": "skipped", "reason": "已在页面应用 AI 建议或未请求 AI"}
-        if params.get("auto_ai"):
-            set_job(job_id, status="ai_processing")
-            try:
-                suggestion = call_deepseek_ai(
-                    params["title"],
-                    "" if params.get("notes_is_fallback") else notes,
-                    params["image_files"],
-                    params["metadata"],
-                )
-                if params.get("notes_is_fallback") and suggestion.get("description_html"):
-                    notes = str(suggestion["description_html"])
-                product_attrs = merge_ai_attributes(product_attrs, suggestion.get("attributes") or [], params["metadata"])
-                ai_status = {
-                    "status": "success",
-                    "description": "已生成" if not params.get("notes_is_fallback") else ("已采用" if notes != params["notes"] else "未采用"),
-                    "attributeCount": len(suggestion.get("attributes") or []),
-                    "warnings": suggestion.get("warnings") or [],
-                }
-            except Exception as exc:
-                ai_status = {"status": "failed", "error": readable_error_text(exc) or repr(exc)}
-                result["ai"] = ai_status
-                raise RuntimeError("AI 处理失败：" + ai_status["error"]) from exc
-        result["ai"] = ai_status
-        set_job(job_id, status="running")
-        common_id = build_common_single_product(
-            params["item_num"],
-            params["credentials"],
-            params["title"],
-            notes,
-            image_urls,
-            skus,
-            params["spec_name"],
-            params["weight"],
-            params["package_length"],
-            params["package_width"],
-            params["package_height"],
-            video_url,
-        )
-        detail_id = claim_common_to_tiktok_single(common_id, params["credentials"])
-        oss_md5, site_info = get_site_info(detail_id, params["credentials"])
-        warehouse_ids = get_default_warehouse_ids(params["shop_ids"], params["credentials"])
-        save_site_product(
-            detail_id,
-            params["credentials"],
-            site_info,
-            oss_md5,
-            params["title"],
-            notes,
-            image_urls,
-            params["cid"],
-            product_attrs,
-            params["sale_attr_id"],
-            params["spec_name"],
-            skus,
-            params["shop_ids"],
-            params["weight"],
-            params["package_length"],
-            params["package_width"],
-            params["package_height"],
-            warehouse_ids,
-            video_url,
-        )
-        claim_tiktok_to_shops(detail_id, params["shop_ids"], params["credentials"])
-        shop_results = []
-        for shop_id in params["shop_ids"]:
-            try:
-                miaoshou_post("get_tk_shop_collect_item_info", {"detailId": detail_id, "shopId": shop_id}, params["credentials"])
-                shop_results.append({"shopId": shop_id, "status": "success"})
-            except Exception as exc:
-                shop_results.append({"shopId": shop_id, "status": "failed", "error": repr(exc)})
-        result.update(
-            {
-                "status": "success" if all(item["status"] == "success" for item in shop_results) else "done_with_errors",
-                "commonCollectBoxDetailId": common_id,
-                "tiktokDetailId": detail_id,
-                "shopResults": shop_results,
-                "image_count": len(image_urls),
-            }
-        )
-    except Exception as exc:
-        result.update({"status": "failed", "error": repr(exc)})
-        cleanup_errors = cleanup_created_single_product(common_id, detail_id, params["credentials"])
-        if cleanup_errors:
-            result["cleanupErrors"] = cleanup_errors
-    log_path = RUN_ROOT / f"single_{job_id}.json"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    json_io.write(log_path, json_io.job_log(result, [result]))
-    set_job(
+    single_product_module.run_single_job(
         job_id,
-        status="done" if result["status"] == "success" else "failed",
-        done_count=1,
-        total_count=1,
-        results=[result],
-        summary=result,
-        log_path=str(log_path.resolve()),
-        finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        params,
+        {
+            "set_job": set_job,
+            "upload_single_images": upload_single_images,
+            "upload_single_video": upload_single_video,
+            "resolve_skus": resolve_skus,
+            "call_deepseek_ai": call_deepseek_ai,
+            "merge_ai_attributes": merge_ai_attributes,
+            "readable_error_text": readable_error_text,
+            "build_common_single_product": build_common_single_product,
+            "claim_common_to_tiktok_single": claim_common_to_tiktok_single,
+            "get_site_info": get_site_info,
+            "get_default_warehouse_ids": get_default_warehouse_ids,
+            "save_site_product": save_site_product,
+            "claim_tiktok_to_shops": claim_tiktok_to_shops,
+            "miaoshou_post": miaoshou_post,
+            "cleanup_created_single_product": cleanup_created_single_product,
+            "run_root": RUN_ROOT,
+        },
     )
 
 
 def start_single_job(job_id: str, params: dict) -> None:
-    thread = threading.Thread(target=run_single_job, args=(job_id, params), daemon=True)
-    thread.start()
+    job_module.start_daemon(run_single_job, job_id, params)
 
 
 image_seq_dirs = file_module.image_seq_dirs
@@ -472,35 +327,9 @@ find_image_base = file_module.find_image_base
 resolve_image_layout = file_module.resolve_image_layout
 
 
-def set_job(job_id: str, **values) -> None:
-    with JOBS_LOCK:
-        JOBS[job_id].update(values)
-
-
-def active_job_id_unlocked(account_id: str | None = None) -> str | None:
-    for job_id, job in reversed(list(JOBS.items())):
-        if job.get("status") in ACTIVE_STATUSES and (account_id is None or job.get("account_id") == account_id):
-            return job_id
-    return None
-
-
-def progress_html(job: dict) -> str:
-    done = int(job.get("done_count") or 0)
-    total = int(job.get("total_count") or 0)
-    percent = min(100, round(done * 100 / total)) if total else 0
-    return f"""
-  <div class="progress-head">
-    <span>当前进度</span>
-    <strong>{done} / {total or "未知"} · {percent}%</strong>
-  </div>
-  <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percent}" aria-label="任务处理进度">
-    <div class="bar" style="width: {percent}%"></div>
-  </div>
-  <div class="progress-meta">
-    <span>源文件 {e(job.get("source_uploaded_count", 0))}</span>
-    <span>图片 {e(job.get("uploaded_count", 0))}</span>
-    <span>预检失败 {e(job.get("preflight_failed_count", 0))}</span>
-  </div>"""
+set_job = job_module.set_job
+active_job_id_unlocked = job_module.active_job_id_unlocked
+progress_html = job_module.progress_html
 
 
 STATUS_LABELS = rendering.STATUS_LABELS
@@ -513,10 +342,7 @@ readable_job_error = error_module.readable_job_error
 ai_status_text = error_module.ai_status_text
 
 
-def job_count_text(job: dict) -> str:
-    done = int(job.get("done_count") or 0)
-    total = int(job.get("total_count") or 0)
-    return f"{done} / {total}" if total else str(done)
+job_count_text = job_module.job_count_text
 
 
 masked_app_key = text_module.masked_app_key
@@ -524,62 +350,12 @@ normalized_text = text_module.normalized_text
 optional_int = form_module.optional_int
 
 
-def matched_template_name(text: str) -> str | None:
-    for name in sorted(TEMPLATES, key=lambda item: len(normalized_text(item)), reverse=True):
-        if normalized_text(name) in text:
-            return name
-    return None
-
-
-def shop_name_from_shops(shops: list[dict]) -> str:
-    name_keys = ("shopName", "shop_name", "storeName", "store_name", "sellerName", "seller_name", "name", "nickName", "alias")
-    for shop in shops:
-        for key in name_keys:
-            value = str(shop.get(key) or "").strip()
-            if value:
-                return value
-    return ""
+matched_template_name = account_module.matched_template_name
+shop_name_from_shops = account_module.shop_name_from_shops
 
 
 def discover_templates(credentials: tuple[str, str], requested_shop_id: int | None = None) -> tuple[int, dict[str, int], str]:
-    found: dict[str, int] = {}
-    shop_id = requested_shop_id
-    shop_name = ""
-    for page in range(1, 11):
-        response = miaoshou_post(
-            "search_tk_collect_products",
-            {"pageNo": page, "pageSize": 100, "status": "notPublished"},
-            credentials,
-        )
-        if response.get("result") == "fail":
-            raise RuntimeError(f"妙手模板自动识别失败: {response}")
-        items = (response.get("data") or {}).get("detailList") or []
-        for item in items:
-            text = normalized_text(item)
-            shops = item.get("collectBoxDetailShopList") or []
-            shop_ids = [int(shop["shopId"]) for shop in shops if str(shop.get("shopId") or "").isdigit()]
-            if requested_shop_id and shop_ids and requested_shop_id not in shop_ids:
-                continue
-            if not shop_name:
-                shop_name = shop_name_from_shops(shops)
-            name = matched_template_name(text)
-            if name and name not in found:
-                found[name] = int(item["collectBoxDetailId"])
-                if shop_id is None and shop_ids:
-                    shop_id = shop_ids[0]
-        if len(found) == len(TEMPLATES) or len(items) < 100:
-            break
-    missing = [name for name in TEMPLATES if name not in found]
-    if missing:
-        raise RuntimeError("未自动识别模板：" + "、".join(missing) + "。请确认模板产品在对应分组里，并处于 TikTok 未发布采集箱。")
-    if shop_id is None:
-        raise RuntimeError("模板已找到，但没有返回妙手账号/shopId。")
-    if not shop_name:
-        first_detail_id = next(iter(found.values()))
-        response = miaoshou_post("get_tk_shop_collect_item_info", {"detailId": first_detail_id, "shopId": shop_id}, credentials)
-        info = (response.get("data") or {}).get("shopCollectItemInfo") or {}
-        shop_name = shop_name_from_shops(info.get("collectBoxDetailShopList") or [])
-    return shop_id, found, shop_name
+    return account_module.discover_templates(credentials, miaoshou_post, requested_shop_id)
 
 
 def run_job(job_id: str, params: dict) -> None:
@@ -633,8 +409,7 @@ def run_job(job_id: str, params: dict) -> None:
 
 
 def start_job(job_id: str, params: dict) -> None:
-    thread = threading.Thread(target=run_job, args=(job_id, params), daemon=True)
-    thread.start()
+    job_module.start_daemon(run_job, job_id, params)
 
 
 def render_page(title: str, body: str, refresh: bool = False, header_right: str = "") -> bytes:
@@ -1089,64 +864,7 @@ def render_release_check(username: str) -> bytes:
 
 
 def render_account_row(account_id: str, account: dict) -> str:
-    locked = bool(account.get("locked"))
-    readonly = "readonly" if locked else ""
-    disabled = "disabled" if locked else ""
-    lock_class = "locked" if locked else "unlocked"
-    lock_text = "已上锁，点击开锁" if locked else "未上锁，点击上锁"
-    shop_label = e(account.get("shop_id") or "")
-    if account.get("shop_name"):
-        shop_label += f"<br><span class=\"hint\">{e(account.get('shop_name'))}</span>"
-    templates = account.get("templates") or {}
-    template_inputs = "".join(
-        f"""<div>
-                <label>{e(name)}模板 ID</label>
-                <input name="template_{e(name)}" type="number" value="{e(templates.get(name) or '')}" placeholder="留空自动识别" {readonly}>
-              </div>"""
-        for name, data in TEMPLATES.items()
-    )
-    return f"""<tr>
-          <td>{e(account.get("name", account_id))}</td>
-          <td>{shop_label}</td>
-          <td>{e(masked_app_key(account.get("app_key")))} / {'Secret 已配置' if account.get("app_secret") else '缺少 Secret'}</td>
-          <td>
-            <form action="/accounts/toggle-lock" method="post" data-submit-lock>
-              <input type="hidden" name="account_id" value="{e(account_id)}">
-              <button type="submit" class="lock-switch {lock_class}" data-working-label="正在切换账号锁...">
-                <span class="lock-track"></span><span>{lock_text}</span>
-              </button>
-            </form>
-          </td>
-          <td>
-            <div class="account-actions">
-            <form action="/accounts/update" method="post" class="account-edit-form" data-submit-lock>
-              <input type="hidden" name="account_id" value="{e(account_id)}">
-              <div>
-                <label>妙手账号名称</label>
-                <input name="name" value="{e(account.get('name', account_id))}" required {readonly}>
-              </div>
-              <div>
-                <label>妙手账号</label>
-                <input name="shop_id" type="number" value="{e(account.get('shop_id') or '')}" placeholder="留空自动识别" {readonly}>
-              </div>
-              <div>
-                <label>APP ID / App Key</label>
-                <input name="app_key" type="password" placeholder="留空不改" autocomplete="new-password" {readonly}>
-              </div>
-              <div>
-                <label>App Secret</label>
-                <input name="app_secret" type="password" placeholder="留空不改" autocomplete="new-password" {readonly}>
-              </div>
-              {template_inputs}
-              <div class="actions-row"><button type="submit" class="ghost" data-working-label="正在保存..." {disabled}>保存</button></div>
-            </form>
-            <form action="/accounts/delete" method="post" onsubmit="return confirm('确认删除这个妙手账号？')">
-              <input type="hidden" name="account_id" value="{e(account_id)}">
-              <button type="submit" class="danger" {disabled}>删除</button>
-            </form>
-            </div>
-          </td>
-        </tr>"""
+    return account_pages.render_account_row(account_id, account, TEMPLATES)
 
 
 def render_accounts(username: str, message: str = "", error: str = "") -> bytes:

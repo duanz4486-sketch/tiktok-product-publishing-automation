@@ -50,6 +50,34 @@ def test_moved_form_and_text_helpers_keep_web_app_contract() -> None:
         raise AssertionError("optional_int should reject non-numeric values")
 
 
+def test_moved_job_helpers_keep_web_app_contract() -> None:
+    job_id = "helper-contract-job"
+    original_jobs = web_app.JOBS.copy()
+    try:
+        with web_app.JOBS_LOCK:
+            web_app.JOBS.clear()
+            web_app.JOBS[job_id] = {
+                "account_id": "acc",
+                "status": "queued",
+                "done_count": 1,
+                "total_count": 4,
+                "source_uploaded_count": 2,
+                "uploaded_count": 3,
+                "preflight_failed_count": 0,
+            }
+
+        assert web_app.active_job_id_unlocked("acc") == job_id
+        assert web_app.job_count_text(web_app.JOBS[job_id]) == "1 / 4"
+        assert 'aria-valuenow="25"' in web_app.progress_html(web_app.JOBS[job_id])
+        web_app.set_job(job_id, status="done", done_count=4)
+        assert web_app.JOBS[job_id]["status"] == "done"
+        assert web_app.JOBS[job_id]["done_count"] == 4
+    finally:
+        with web_app.JOBS_LOCK:
+            web_app.JOBS.clear()
+            web_app.JOBS.update(original_jobs)
+
+
 def test_saved_account_form_can_edit_key_without_revealing_secret() -> None:
     app_key = "ak_b123456789f69c"
     html = web_app.render_account_row(
