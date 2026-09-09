@@ -6,23 +6,22 @@ import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, message="'cgi' is deprecated.*")
 import cgi
-import html
-import re
 import threading
 import urllib.parse
 import urllib.request
-import uuid
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, VALID_IMAGE_EXTS, natural_key, post as miaoshou_post, read_items, run_batch
+from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, post as miaoshou_post, read_items, run_batch
 from miaoshou_tool import account_pages
 from miaoshou_tool import accounts as account_module
 from miaoshou_tool import ai as ai_module
 from miaoshou_tool import ai_pages
+from miaoshou_tool import ai_requests
+from miaoshou_tool import batch_jobs
 from miaoshou_tool import batch_pages
+from miaoshou_tool import batch_requests
 from miaoshou_tool import config as config_module
 from miaoshou_tool import errors as error_module
 from miaoshou_tool import files as file_module
@@ -38,6 +37,7 @@ from miaoshou_tool import rendering
 from miaoshou_tool import self_check
 from miaoshou_tool import single_product as single_product_module
 from miaoshou_tool import single_pages
+from miaoshou_tool import single_requests
 from miaoshou_tool import system_pages
 from miaoshou_tool import text as text_module
 
@@ -359,57 +359,23 @@ def discover_templates(credentials: tuple[str, str], requested_shop_id: int | No
 
 
 def run_job(job_id: str, params: dict) -> None:
-    def progress(result: dict) -> None:
-        with JOBS_LOCK:
-            job = JOBS[job_id]
-            job["done_count"] = job.get("done_count", 0) + 1
-            job.setdefault("results", []).append(result)
-
-    try:
-        seqs = params.pop("seqs")
-        source_files = params.pop("source_files", [])
-        preflight_failures = params.pop("preflight_failures", [])
-        if params.pop("upload_to_oss", False):
-            set_job(job_id, status="uploading")
-            source_uploaded_count = upload_source_files_to_oss(params["image_prefix"], source_files)
-            uploaded_count = upload_images_to_oss(params["local_image_root"], params["image_prefix"], seqs)
-            set_job(job_id, uploaded_count=uploaded_count, source_uploaded_count=source_uploaded_count)
-        if not seqs:
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = RUN_ROOT / f"{params['batch']}_{run_id}.json"
-            summary = {
-                "batch": params["batch"],
-                "template": params["template"],
-                "total": len(preflight_failures),
-                "success": 0,
-                "dryRunOk": 0,
-                "failed": preflight_failures,
-                "logPath": str(log_path.resolve()),
-            }
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            json_io.write(log_path, json_io.job_log(summary, preflight_failures))
-            set_job(job_id, status="done_with_errors", summary=summary, log_path=summary["logPath"])
-            return
-        set_job(job_id, status="running", started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        summary = run_batch(progress=progress, **params)
-        if preflight_failures:
-            log_path = Path(summary["logPath"])
-            data = json_io.read(log_path, {}) or {}
-            data["results"] = preflight_failures + (data.get("results") or [])
-            summary["total"] = len(data["results"])
-            summary["failed"] = preflight_failures + (summary.get("failed") or [])
-            data["summary"] = summary
-            json_io.write(log_path, data)
-        status = "done" if not summary["failed"] else "done_with_errors"
-        set_job(job_id, status=status, summary=summary, log_path=summary["logPath"])
-    except Exception as exc:
-        set_job(job_id, status="failed", error=repr(exc))
-
-    set_job(job_id, finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    batch_jobs.run_batch_job(
+        job_id,
+        params,
+        {
+            "jobs": JOBS,
+            "jobs_lock": JOBS_LOCK,
+            "set_job": set_job,
+            "upload_source_files_to_oss": upload_source_files_to_oss,
+            "upload_images_to_oss": upload_images_to_oss,
+            "run_batch": run_batch,
+            "run_root": RUN_ROOT,
+        },
+    )
 
 
 def start_job(job_id: str, params: dict) -> None:
-    job_module.start_daemon(run_job, job_id, params)
+    batch_jobs.start_batch_job(job_module.start_daemon, run_job, job_id, params)
 
 
 def render_page(title: str, body: str, refresh: bool = False, header_right: str = "") -> bytes:
@@ -604,20 +570,24 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect("/")
             return
         if path == "/ai-settings":
-            username = DEFAULT_OPERATOR
             try:
                 form = cgi.FieldStorage(
                     fp=self.rfile,
                     headers=self.headers,
                     environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
                 )
-                settings = ai_settings_from_form(form)
-                if field_text(form, "action", "save") == "test":
-                    test_ai_settings(settings_for_ai_test(settings))
-                    self.redirect("/ai-settings?message=" + urllib.parse.quote("AI 测试成功：当前配置可以返回图片识别 JSON。"))
-                else:
-                    save_ai_settings(settings)
-                    self.redirect("/ai-settings?message=" + urllib.parse.quote("AI 设置已保存"))
+                self.redirect(
+                    ai_requests.handle_ai_settings_form(
+                        form,
+                        {
+                            "ai_settings_from_form": ai_settings_from_form,
+                            "field_text": field_text,
+                            "test_ai_settings": test_ai_settings,
+                            "settings_for_ai_test": settings_for_ai_test,
+                            "save_ai_settings": save_ai_settings,
+                        },
+                    )
+                )
             except Exception as exc:
                 self.redirect("/ai-settings?error=" + urllib.parse.quote(str(exc)))
             return
@@ -628,27 +598,21 @@ class Handler(BaseHTTPRequestHandler):
                     headers=self.headers,
                     environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
                 )
-                config = load_accounts_config()
-                account_id = field_text(form, "account_id")
-                account = (config.get("accounts") or {}).get(account_id)
-                if not account:
-                    raise ValueError("请先选择有效的妙手账号")
-                credentials = account_credentials(account)
-                title = field_text(form, "title")
-                if not title:
-                    raise ValueError("请先填写英文标题")
-                require_english(title, "英文标题")
-                notes = field_text(form, "notes")
-                if notes:
-                    require_english(notes, "英文详情描述")
-                cid = int_field(form, "cid", "类目 ID", 1)
-                shop_ids = [int(str(item.value)) for item in field_list(form, "shop_id") if str(item.value or "").isdigit()]
-                metadata = get_category_metadata(cid, credentials, shop_ids[:3] if shop_ids else None)
-                upload_dir = UPLOAD_ROOT / ("ai-" + datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8])
-                image_files = uploaded_image_files(form, upload_dir)
-                if not image_files:
-                    raise ValueError("请先上传产品图片，AI 需要图片才能识别软参数")
-                suggestion = call_deepseek_ai(title, notes, image_files, metadata)
+                suggestion = ai_requests.suggest_single_product(
+                    form,
+                    {
+                        "load_accounts_config": load_accounts_config,
+                        "field_text": field_text,
+                        "field_list": field_list,
+                        "int_field": int_field,
+                        "account_credentials": account_credentials,
+                        "require_english": require_english,
+                        "get_category_metadata": get_category_metadata,
+                        "uploaded_image_files": uploaded_image_files,
+                        "upload_root": UPLOAD_ROOT,
+                        "call_deepseek_ai": call_deepseek_ai,
+                    },
+                )
                 self.send_json({"ok": True, "suggestion": suggestion})
             except Exception as exc:
                 self.send_json({"ok": False, "error": readable_error_text(exc) or str(exc)}, 400)
@@ -661,94 +625,41 @@ class Handler(BaseHTTPRequestHandler):
                     headers=self.headers,
                     environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
                 )
-                config = load_accounts_config()
-                account_ids = all_account_ids(config)
-                account_id = field_text(form, "account_id")
-                if account_id not in account_ids:
-                    raise ValueError("未找到这个妙手账号配置")
-                account = (config.get("accounts") or {}).get(account_id)
-                if not account:
-                    raise ValueError("未找到这个妙手账号配置")
-                with JOBS_LOCK:
-                    active_id = active_job_id_unlocked(account_id)
-                if active_id:
-                    body = f"""{render_top_nav("single")}<section>{alert_html("warn", "这个妙手账号正在处理上一批。同一个妙手账号完成前不能提交下一批。")}<p><a href="/job?id={e(active_id)}">查看当前任务</a></p></section>"""
-                    self.send_html(render_page("这个账号正在处理", body, refresh=True, header_right=render_account_menu(username, len(account_ids))), 409)
-                    return
-
-                credentials = account_credentials(account)
-                cid = int_field(form, "cid", "类目 ID", 1)
-                title = field_text(form, "title")
-                if not 25 <= len(title) <= 255:
-                    raise ValueError("英文标题长度必须在 25-255 字符")
-                require_english(title, "英文标题")
-                notes = field_text(form, "notes")
-                notes_is_fallback = False
-                if notes:
-                    require_english(notes, "英文详情描述")
-                else:
-                    notes = f"<p>{html.escape(title)}</p>"
-                    notes_is_fallback = True
-                ai_suggest_applied = field_text(form, "ai_suggest_applied") == "1"
-                weight = decimal_field(form, "weight", "重量", 0.001, 100)
-                package_length = decimal_field(form, "package_length", "包装长度", 1, 1000)
-                package_width = decimal_field(form, "package_width", "包装宽度", 1, 1000)
-                package_height = decimal_field(form, "package_height", "包装高度", 1, 1000)
-                shop_ids = [int(str(item.value)) for item in field_list(form, "shop_id") if str(item.value or "").isdigit()]
-                if not shop_ids:
-                    raise ValueError("请至少选择一个店铺")
-                metadata = get_category_metadata(cid, credentials, shop_ids[:3])
-                product_attrs = build_product_attributes(form, metadata)
-
-                job_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-                upload_dir = UPLOAD_ROOT / job_id
-                sku_image_paths = uploaded_sku_image_files(form, upload_dir)
-                sale_attr_id, spec_name, sku_rows = parse_sku_rows(form, sku_image_paths)
-                image_files = uploaded_image_files(form, upload_dir)
-                if not image_files:
-                    raise ValueError("请上传产品图片文件夹、多张图片或图片 ZIP")
-                video_file = uploaded_video_file(form, upload_dir)
-                image_prefix = clean_prefix(field_text(form, "image_prefix"))
-                if not image_prefix:
-                    title_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-")[:80] or "single-product"
-                    image_prefix = f"single/{title_slug}"
-                item_num = field_text(form, "item_num", f"SINGLE-{datetime.now().strftime('%Y%m%d%H%M%S')}")[:50]
-
-                with JOBS_LOCK:
-                    JOBS[job_id] = job_module.single_job_record(
-                        title[:60],
-                        account_id,
-                        account.get("name", account_id),
-                        username,
-                        image_prefix,
-                    )
-                start_single_job(
-                    job_id,
+                result = single_requests.create_single_job(
+                    form,
+                    username,
                     {
-                        "credentials": credentials,
-                        "title": title,
-                        "notes": notes,
-                        "notes_is_fallback": notes_is_fallback,
-                        "cid": cid,
-                        "product_attrs": product_attrs,
-                        "metadata": metadata,
-                        "auto_ai": not ai_suggest_applied,
-                        "sale_attr_id": sale_attr_id,
-                        "spec_name": spec_name,
-                        "sku_rows": sku_rows,
-                        "shop_ids": shop_ids,
-                        "weight": weight,
-                        "package_length": package_length,
-                        "package_width": package_width,
-                        "package_height": package_height,
-                        "image_files": image_files,
-                        "video_file": video_file,
-                        "image_prefix": image_prefix,
-                        "item_num": item_num,
+                        "load_accounts_config": load_accounts_config,
+                        "all_account_ids": all_account_ids,
+                        "field_text": field_text,
+                        "field_list": field_list,
+                        "int_field": int_field,
+                        "decimal_field": decimal_field,
+                        "account_credentials": account_credentials,
+                        "require_english": require_english,
+                        "get_category_metadata": get_category_metadata,
+                        "build_product_attributes": build_product_attributes,
+                        "uploaded_sku_image_files": uploaded_sku_image_files,
+                        "parse_sku_rows": parse_sku_rows,
+                        "uploaded_image_files": uploaded_image_files,
+                        "uploaded_video_file": uploaded_video_file,
+                        "clean_prefix": clean_prefix,
+                        "upload_root": UPLOAD_ROOT,
+                        "jobs": JOBS,
+                        "jobs_lock": JOBS_LOCK,
+                        "active_job_id_unlocked": active_job_id_unlocked,
+                        "single_job_record": job_module.single_job_record,
+                        "start_single_job": start_single_job,
                     },
                 )
+                if result["status"] == "active":
+                    active_id = result["active_id"]
+                    account_count = int(result["account_count"])
+                    body = f"""{render_top_nav("single")}<section>{alert_html("warn", "这个妙手账号正在处理上一批。同一个妙手账号完成前不能提交下一批。")}<p><a href="/job?id={e(active_id)}">查看当前任务</a></p></section>"""
+                    self.send_html(render_page("这个账号正在处理", body, refresh=True, header_right=render_account_menu(username, account_count)), 409)
+                    return
                 self.send_response(303)
-                self.send_header("Location", f"/job?id={job_id}")
+                self.send_header("Location", f"/job?id={result['job_id']}")
                 self.end_headers()
             except Exception as exc:
                 self.send_html(render_failure_page("创建单产品任务失败", exc, "/single", "返回单产品上传", username), 400)
@@ -784,95 +695,41 @@ class Handler(BaseHTTPRequestHandler):
                 headers=self.headers,
                 environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
             )
-            config = load_accounts_config()
-            account_ids = all_account_ids(config)
-            account_id = field_text(form, "account_id")
-            if account_id not in account_ids:
-                raise ValueError("未找到这个妙手账号配置")
-            account = (config.get("accounts") or {}).get(account_id)
-            if not account:
-                raise ValueError("未找到这个妙手账号配置")
-            batch = field_text(form, "batch")
-            template = field_text(form, "template", DEFAULT_TEMPLATE)
-            image_prefix = field_text(form, "image_prefix")
-            if not batch:
-                raise ValueError("请填写批次名")
-            if template not in TEMPLATES:
-                raise ValueError("请选择有效的产品模板")
-            template_detail_id = int((account.get("templates") or {}).get(template) or 0)
-            if not template_detail_id:
-                raise ValueError(f"这个妙手账号没有配置「{template}」模板")
-            shop_id = int(account.get("shop_id") or SHOP_ID)
-            app_key = str(account.get("app_key") or "").strip()
-            app_secret = str(account.get("app_secret") or "").strip()
-            if ACCOUNTS_PATH.exists() and (not app_key or not app_secret):
-                raise ValueError("这个妙手账号缺少 app_key/app_secret，请先补全 accounts.json")
-            miaoshou_credentials = (app_key, app_secret) if app_key and app_secret else None
-            limit_text = field_text(form, "limit")
-            limit = int(limit_text) if limit_text else None
-            dry_run = "dry_run" in form
-            upload_to_oss = "upload_to_oss" in form
-
-            job_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-            upload_dir = UPLOAD_ROOT / job_id
-            title_path = upload_dir / "title.xlsx"
-            image_root = upload_dir / "images"
-            title_original_name = upload_filename(form, "title_file", "title.xlsx")
-            save_upload(form, "title_file", title_path)
-            _, image_source_files = stage_batch_images(form, upload_dir, image_root)
-            items = read_items(title_path)
-            if limit:
-                items = items[:limit]
-            excel_seqs = [int(item["seq"]) for item in items]
-            image_root, image_prefix = resolve_image_layout(image_root, batch, excel_seqs, image_prefix)
-            image_seqs = image_seq_dirs(image_root)
-            preflight_failures = build_preflight_failures(items, image_root, image_seqs, include_image_only=limit is None)
-            items = [item for item in items if int(item["seq"]) in image_seqs]
-            process_seqs = [int(item["seq"]) for item in items]
-            if not items and not preflight_failures:
-                found_text = "、".join(str(seq) for seq in sorted(image_seqs)[:30]) or "没有找到序号文件夹"
-                raise ValueError(f"本次图片来源里没有任何能和 Excel 序号对应的图片文件夹。当前识别到的图片序号是：{found_text}")
-            total_count = len(items) + len(preflight_failures)
-
-            with JOBS_LOCK:
-                active_id = active_job_id_unlocked(account_id)
-                if not active_id:
-                    JOBS[job_id] = job_module.batch_job_record(
-                        batch,
-                        account_id,
-                        account.get("name", account_id),
-                        username,
-                        template,
-                        image_prefix,
-                        total_count,
-                        preflight_failures,
-                    )
-            if active_id:
+            result = batch_requests.create_batch_job(
+                form,
+                username,
+                {
+                    "load_accounts_config": load_accounts_config,
+                    "all_account_ids": all_account_ids,
+                    "field_text": field_text,
+                    "upload_filename": upload_filename,
+                    "save_upload": save_upload,
+                    "stage_batch_images": stage_batch_images,
+                    "read_items": read_items,
+                    "resolve_image_layout": resolve_image_layout,
+                    "image_seq_dirs": image_seq_dirs,
+                    "build_preflight_failures": build_preflight_failures,
+                    "upload_root": UPLOAD_ROOT,
+                    "run_root": RUN_ROOT,
+                    "accounts_path": ACCOUNTS_PATH,
+                    "jobs": JOBS,
+                    "jobs_lock": JOBS_LOCK,
+                    "active_job_id_unlocked": active_job_id_unlocked,
+                    "batch_job_record": job_module.batch_job_record,
+                    "start_job": start_job,
+                    "templates": TEMPLATES,
+                    "default_template": DEFAULT_TEMPLATE,
+                    "default_shop_id": SHOP_ID,
+                },
+            )
+            if result["status"] == "active":
+                active_id = result["active_id"]
+                account_count = int(result["account_count"])
                 body = f"""{render_top_nav("batch")}<section>{alert_html("warn", "这个妙手账号正在处理上一批。同一个妙手账号完成前不能提交下一批，避免标题和图片错配。")}<p><a href="/job?id={e(active_id)}">查看当前批次</a></p></section>"""
-                self.send_html(render_page("这个账号正在处理", body, refresh=True, header_right=render_account_menu(username, len(account_ids))), 409)
+                self.send_html(render_page("这个账号正在处理", body, refresh=True, header_right=render_account_menu(username, account_count)), 409)
                 return
-            params = {
-                "batch": batch,
-                "title_file": title_path,
-                "local_image_root": image_root,
-                "shop_id": shop_id,
-                "image_prefix": image_prefix,
-                "template": template,
-                "template_detail_id": template_detail_id,
-                "limit": limit,
-                "dry_run": dry_run,
-                "upload_to_oss": upload_to_oss,
-                "seqs": process_seqs,
-                "only_seqs": process_seqs,
-                "source_files": [(title_path, title_original_name), *image_source_files],
-                "preflight_failures": preflight_failures,
-                "reuse_existing": False,
-                "log_dir": RUN_ROOT,
-                "miaoshou_credentials": miaoshou_credentials,
-            }
-            start_job(job_id, params)
             self.send_response(303)
-            self.send_header("Location", f"/job?id={job_id}")
+            self.send_header("Location", f"/job?id={result['job_id']}")
             self.end_headers()
         except Exception as exc:
             self.send_html(render_failure_page("创建任务失败", exc, "/", "返回首页", username), 400)
