@@ -1,39 +1,29 @@
 {
-  "users": [
-    {
-      "username": "admin",
-      "password": "change-me",
-      "accounts": ["main"]
-    },
-    {
-      "username": "staff1",
-      "password": "change-me",
-      "accounts": ["staff1"]
-    }
-  ],
   "accounts": {
     "main": {
       "name": "主妙手账号",
-      "shop_id": 13781675,
+      "shop_id": 10000001,
+      "shop_name": "示例店铺一",
       "app_key": "your_miaoshou_app_key",
       "app_secret": "your_miaoshou_app_secret",
       "locked": false,
       "templates": {
-        "大地毯": 3325026487,
-        "非定制毛毯": 3337135157,
-        "定制毛毯": 3337135151
+        "大地毯": 1000000001,
+        "非定制毛毯": 1000000002,
+        "定制毛毯": 1000000003
       }
     },
     "staff1": {
       "name": "团队成员妙手账号",
-      "shop_id": 13781675,
+      "shop_id": 10000002,
+      "shop_name": "示例店铺二",
       "app_key": "staff_miaoshou_app_key",
       "app_secret": "staff_miaoshou_app_secret",
       "locked": false,
       "templates": {
-        "大地毯": 3325026487,
-        "非定制毛毯": 3337135157,
-        "定制毛毯": 3337135151
+        "大地毯": 2000000001,
+        "非定制毛毯": 2000000002,
+        "定制毛毯": 2000000003
       }
     }
   }

@@ -1,11 +1,39 @@
 from pathlib import Path
 import io
 import json
+import os
 import tempfile
 import zipfile
 
 import batch_tiktok_collect
 import web_app
+from miaoshou_tool import access_gate
+from miaoshou_tool import json_io
+
+
+def test_access_gate_defaults_to_local_open_mode() -> None:
+    root = Path(tempfile.mkdtemp())
+
+    assert not access_gate.is_enabled(root)
+    assert access_gate.valid_request("", root)
+
+
+def test_access_gate_accepts_only_signed_session_cookie() -> None:
+    root = Path(tempfile.mkdtemp())
+    (root / ".env").write_text(
+        "WEB_ACCESS_PASSWORD=private-password\nWEB_SESSION_SECRET=session-secret\n",
+        encoding="utf-8",
+    )
+
+    assert access_gate.is_enabled(root)
+    assert not access_gate.valid_request("", root)
+    assert not access_gate.password_matches("wrong", root)
+    assert access_gate.password_matches("private-password", root)
+
+    cookie = access_gate.login_cookie(root)
+    assert "private-password" not in cookie
+    assert "session-secret" not in cookie
+    assert access_gate.valid_request(cookie, root)
 
 
 def test_zip_subset_is_used_as_source_of_truth() -> None:
@@ -26,6 +54,55 @@ def test_zip_subset_is_used_as_source_of_truth() -> None:
     assert len(failures) == 25
     assert failures[0]["seq"] == 6
     assert failures[0]["error"] == "缺少图片文件夹"
+
+
+def test_json_helpers_use_one_compact_safe_format() -> None:
+    payload = {"message": "</script>", "items": [1, "二"]}
+
+    assert json_io.dumps(payload, compact=True) == '{"message":"</script>","items":[1,"二"]}'
+    assert web_app.json_for_html(payload) == '{"message":"<\\/script>","items":[1,"二"]}'
+
+
+def test_moved_form_and_text_helpers_keep_web_app_contract() -> None:
+    assert web_app.masked_app_key("ak_b123456789f69c") == "ak_b...f69c"
+    assert web_app.normalized_text({"group": "非 定 制 毛 毯"}) == "非定制毛毯"
+    assert web_app.optional_int("", "数量") is None
+    assert web_app.optional_int("3", "数量") == 3
+
+    try:
+        web_app.optional_int("abc", "数量")
+    except ValueError as exc:
+        assert "数量 必须是数字" in str(exc)
+    else:
+        raise AssertionError("optional_int should reject non-numeric values")
+
+
+def test_moved_job_helpers_keep_web_app_contract() -> None:
+    job_id = "helper-contract-job"
+    original_jobs = web_app.JOBS.copy()
+    try:
+        with web_app.JOBS_LOCK:
+            web_app.JOBS.clear()
+            web_app.JOBS[job_id] = {
+                "account_id": "acc",
+                "status": "queued",
+                "done_count": 1,
+                "total_count": 4,
+                "source_uploaded_count": 2,
+                "uploaded_count": 3,
+                "preflight_failed_count": 0,
+            }
+
+        assert web_app.active_job_id_unlocked("acc") == job_id
+        assert web_app.job_count_text(web_app.JOBS[job_id]) == "1 / 4"
+        assert 'aria-valuenow="25"' in web_app.progress_html(web_app.JOBS[job_id])
+        web_app.set_job(job_id, status="done", done_count=4)
+        assert web_app.JOBS[job_id]["status"] == "done"
+        assert web_app.JOBS[job_id]["done_count"] == 4
+    finally:
+        with web_app.JOBS_LOCK:
+            web_app.JOBS.clear()
+            web_app.JOBS.update(original_jobs)
 
 
 def test_saved_account_form_can_edit_key_without_revealing_secret() -> None:
@@ -64,7 +141,7 @@ def test_discover_templates_uses_template_keywords_and_shop_id() -> None:
                 {
                     "collectBoxDetailId": 1000 + index,
                     "collectGroupName": f"任意账号-{name}-参数",
-                    "collectBoxDetailShopList": [{"shopId": 555, "shopName": "Print & Purl"}],
+                    "collectBoxDetailShopList": [{"shopId": 555, "shopName": "Example Shop"}],
                 }
             )
         return {"result": "success", "data": {"detailList": detail_list}}
@@ -76,7 +153,7 @@ def test_discover_templates_uses_template_keywords_and_shop_id() -> None:
         web_app.miaoshou_post = old_post
 
     assert shop_id == 555
-    assert shop_name == "Print & Purl"
+    assert shop_name == "Example Shop"
     assert templates == {"大地毯": 1001, "非定制毛毯": 1002, "定制毛毯": 1003}
     assert web_app.matched_template_name(web_app.normalized_text({"group": "非定制毛毯参数"})) == "非定制毛毯"
 
@@ -86,20 +163,20 @@ def test_confirm_page_does_not_render_secrets() -> None:
     try:
         with web_app.PENDING_ACCOUNTS_LOCK:
             web_app.PENDING_ACCOUNTS[token] = {
-                "username": "duanhaha",
+                "username": "operator",
                 "name": "测试账号",
                 "shop_id": 555,
-                "shop_name": "Print & Purl",
+                "shop_name": "Example Shop",
                 "app_key": "ak_b123456789f69c",
                 "app_secret": "hidden_secret",
                 "templates": {"大地毯": 1001, "非定制毛毯": 1002, "定制毛毯": 1003},
             }
-        html = web_app.render_account_confirm("duanhaha", token).decode("utf-8")
+        html = web_app.render_account_confirm("operator", token).decode("utf-8")
     finally:
         with web_app.PENDING_ACCOUNTS_LOCK:
             web_app.PENDING_ACCOUNTS.pop(token, None)
 
-    assert "Print &amp; Purl" in html
+    assert "Example Shop" in html
     assert "555" in html
     assert "ak_b123456789f69c" not in html
     assert "hidden_secret" not in html
@@ -107,6 +184,9 @@ def test_confirm_page_does_not_render_secrets() -> None:
 
 
 def test_status_labels_and_errors_are_user_friendly() -> None:
+    assert web_app.status_label("ok") == "正常"
+    assert web_app.status_label("warn") == "提醒"
+    assert web_app.status_label("error") == "失败"
     assert web_app.status_label("done_with_errors") == "部分失败"
     assert "部分失败" in web_app.status_badge("done_with_errors")
     assert "图片链接无法读取" in web_app.readable_error_text("HTTPError 404: Not Found")
@@ -161,6 +241,10 @@ def test_home_uses_saved_miaoshou_accounts_without_web_user() -> None:
         html = web_app.render_home("anyone").decode("utf-8")
 
         assert "新建批次" in html
+        assert "模板批量上传" in html
+        assert "稳定" in html
+        assert "单产品智能上传" in html
+        assert "开发中" in html
         assert "测试妙手账号" in html
         assert "登录" not in html
         assert "用户名" not in html
@@ -195,6 +279,72 @@ def test_batch_endpoints_are_declared() -> None:
     }
 
     assert required <= set(batch_tiktok_collect.ENDPOINTS)
+
+
+def test_release_check_reports_template_batch_readiness() -> None:
+    root = Path(tempfile.mkdtemp())
+    (root / ".env").write_text(
+        "OSS_BUCKET=test-bucket\n"
+        "OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com\n"
+        "OSS_REGION=cn-shenzhen\n"
+        "OSS_ACCESS_KEY_ID=id\n"
+        "OSS_ACCESS_KEY_SECRET=secret\n",
+        encoding="utf-8",
+    )
+    (root / ".gitignore").write_text(".env\naccounts.json\nai_settings.json\nruns/\nuploads/\n", encoding="utf-8")
+    accounts_path = root / "accounts.json"
+    json_io.write(
+        accounts_path,
+        {
+            "accounts": {
+                "acc": {
+                    "name": "测试妙手账号",
+                    "shop_id": 123,
+                    "app_key": "key",
+                    "app_secret": "secret",
+                    "templates": {"大地毯": 1, "非定制毛毯": 2, "定制毛毯": 3},
+                }
+            }
+        },
+    )
+
+    report = web_app.self_check.run_release_check(root, accounts_path)
+
+    assert report["ok"] is True
+    assert report["summary"]["error"] == 0
+    assert any(item["key"] == "gitignore" and item["status"] == "ok" for item in report["checks"])
+
+
+def test_release_check_flags_missing_miaoshou_templates() -> None:
+    root = Path(tempfile.mkdtemp())
+    (root / ".env").write_text(
+        "OSS_BUCKET=test-bucket\n"
+        "OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com\n"
+        "OSS_REGION=cn-shenzhen\n"
+        "OSS_ACCESS_KEY_ID=id\n"
+        "OSS_ACCESS_KEY_SECRET=secret\n",
+        encoding="utf-8",
+    )
+    accounts_path = root / "accounts.json"
+    json_io.write(
+        accounts_path,
+        {
+            "accounts": {
+                "acc": {
+                    "name": "测试妙手账号",
+                    "shop_id": 123,
+                    "app_key": "key",
+                    "app_secret": "secret",
+                    "templates": {"大地毯": 1},
+                }
+            }
+        },
+    )
+
+    report = web_app.self_check.run_release_check(root, accounts_path)
+
+    assert report["ok"] is False
+    assert any("非定制毛毯" in item["message"] and item["status"] == "error" for item in report["checks"])
 
 
 def test_flatten_category_tree_keeps_leaf_paths_only() -> None:
@@ -282,8 +432,9 @@ def test_single_form_uses_local_sku_image_upload() -> None:
             "categoryProductAttrList": [],
         }
 
-        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+        html = web_app.render_single("operator", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
 
+        assert "单产品智能上传仍在开发和完善中" in html
         assert 'name="sku_image_file_0"' in html
         assert 'name="image_upload"' in html
         assert 'id="image_upload_files"' in html
@@ -427,7 +578,7 @@ def test_get_default_warehouse_ids_uses_default_then_first_available() -> None:
                 "shopWarehouseList": [
                     {
                         "shopId": 789,
-                        "shopName": "Print & Purl",
+                        "shopName": "Example Shop",
                         "warehouseList": [
                             {"warehouseId": "WH-A", "isDefault": "0"},
                             {"warehouseId": "WH-B", "isDefault": "1"},
@@ -607,7 +758,7 @@ def test_single_form_shows_required_category_attrs_before_package_fields() -> No
             "categoryConfig": {"packageDimensionIsRequired": "true"},
         }
 
-        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+        html = web_app.render_single("operator", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
 
         assert "材质 / Material" in html
         assert "选择类目后会显示必填属性" not in html
@@ -746,6 +897,7 @@ def test_ai_settings_page_uses_presets_without_rendering_key() -> None:
 def test_upload_single_images_keeps_order() -> None:
     original_put = web_app.put_oss_object
     temp_root = Path(tempfile.mkdtemp())
+    old_env = {name: os.environ.get(name) for name in ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")}
     files = []
     for name in ["1.jpg", "2.jpg", "3.jpg"]:
         path = temp_root / name
@@ -753,16 +905,52 @@ def test_upload_single_images_keeps_order() -> None:
         files.append(path)
     calls = []
     try:
+        os.environ["OSS_BUCKET"] = "test-bucket"
+        os.environ["OSS_ENDPOINT"] = "oss-cn-shenzhen.aliyuncs.com"
+        os.environ["OSS_REGION"] = "cn-shenzhen"
         web_app.put_oss_object = lambda file_path, object_key: calls.append(object_key)  # type: ignore[assignment]
         urls = web_app.upload_single_images(files, "single/test")
     finally:
         web_app.put_oss_object = original_put  # type: ignore[assignment]
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     assert urls == [
-        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/1.jpg",
-        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/2.jpg",
-        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/3.jpg",
+        "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/1.jpg",
+        "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/2.jpg",
+        "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/3.jpg",
     ]
     assert sorted(calls) == ["single/test/1.jpg", "single/test/2.jpg", "single/test/3.jpg"]
+
+
+def test_oss_config_requires_deployer_bucket_settings() -> None:
+    original_loader = web_app.oss_upload.load_local_env
+    old_env = {name: os.environ.get(name) for name in ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")}
+    try:
+        web_app.oss_upload.load_local_env = lambda: None  # type: ignore[assignment]
+        for name in old_env:
+            os.environ.pop(name, None)
+        try:
+            web_app.oss_upload.oss_config()
+        except RuntimeError as exc:
+            assert "OSS_BUCKET" in str(exc)
+            assert "公开部署" in str(exc)
+        else:
+            raise AssertionError("oss_config should reject missing bucket settings")
+
+        os.environ["OSS_BUCKET"] = "test-bucket"
+        os.environ["OSS_ENDPOINT"] = "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/"
+        os.environ["OSS_REGION"] = "cn-shenzhen"
+        assert web_app.oss_upload.object_url("folder/a b.jpg") == "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/folder/a%20b.jpg"
+    finally:
+        web_app.oss_upload.load_local_env = original_loader  # type: ignore[assignment]
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_unified_single_image_upload_accepts_images_and_zip() -> None:
@@ -820,17 +1008,26 @@ def test_batch_folder_upload_preserves_sequence_folders() -> None:
 def test_upload_single_video_uses_video_folder() -> None:
     original_put = web_app.put_oss_object
     temp_root = Path(tempfile.mkdtemp())
+    old_env = {name: os.environ.get(name) for name in ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")}
     file_path = temp_root / "main video.mp4"
     file_path.write_bytes(b"x")
     calls = []
     try:
+        os.environ["OSS_BUCKET"] = "test-bucket"
+        os.environ["OSS_ENDPOINT"] = "oss-cn-shenzhen.aliyuncs.com"
+        os.environ["OSS_REGION"] = "cn-shenzhen"
         web_app.put_oss_object = lambda uploaded_path, object_key: calls.append((uploaded_path, object_key))  # type: ignore[assignment]
         url = web_app.upload_single_video(file_path, "single/test")
     finally:
         web_app.put_oss_object = original_put  # type: ignore[assignment]
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     assert calls == [(file_path, "single/test/video/main video.mp4")]
-    assert url == "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/video/main%20video.mp4"
+    assert url == "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/video/main%20video.mp4"
 
 
 def test_single_form_renders_ai_suggestion_button() -> None:
@@ -850,7 +1047,7 @@ def test_single_form_renders_ai_suggestion_button() -> None:
             "categorySaleAttrList": [{"attrId": "size", "attributeNameAlias": "尺寸", "name": "Size"}],
             "categoryProductAttrList": [{"attrId": "material", "name": "Material", "isCustomized": "true"}],
         }
-        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+        html = web_app.render_single("operator", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
     finally:
         (
             web_app.load_accounts_config,
@@ -1042,7 +1239,10 @@ def test_single_job_ai_failure_blocks_miaoshou_create() -> None:
 
 
 if __name__ == "__main__":
+    test_access_gate_defaults_to_local_open_mode()
+    test_access_gate_accepts_only_signed_session_cookie()
     test_zip_subset_is_used_as_source_of_truth()
+    test_json_helpers_use_one_compact_safe_format()
     test_saved_account_form_can_edit_key_without_revealing_secret()
     test_discover_templates_uses_template_keywords_and_shop_id()
     test_confirm_page_does_not_render_secrets()
@@ -1064,6 +1264,7 @@ if __name__ == "__main__":
     test_ai_description_policy_blocks_banned_words()
     test_ai_settings_page_uses_presets_without_rendering_key()
     test_upload_single_images_keeps_order()
+    test_oss_config_requires_deployer_bucket_settings()
     test_unified_single_image_upload_accepts_images_and_zip()
     test_batch_folder_upload_preserves_sequence_folders()
     test_upload_single_video_uses_video_folder()

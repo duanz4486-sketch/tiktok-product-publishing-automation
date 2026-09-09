@@ -1,96 +1,103 @@
-# TikTok Product Publishing Automation
+# TikTok 产品发布自动化
 
-## 项目简介
-这是一个用于跨境电商商品批量发布的自动化系统。
-系统可以读取 Excel 商品标题和本地商品图片，
-自动完成图片上传、妙手 OpenAPI 调用、模板匹配、
-TikTok 商品创建以及批量任务执行。
+这是一个面向跨境电商团队的妙手 TikTok 批量上货工具。当前稳定入口是「模板批量上传」：用已经在妙手里保存好的产品参数模板，批量替换每个产品的标题和图片，再保存到 TikTok 采集箱。
 
-## 项目解决的问题
-传统商品上架流程需要人工重复执行：
-- 整理商品标题
-- 上传图片
-- 创建商品
-- 匹配模板
-- 检查参数
-- 批量处理失败任务
+> 单产品 / 单个链接智能上传入口仍在开发和完善中，当前公开说明先不把它作为正式可用流程。
 
-本项目将这些固定流程自动化，减少人工重复操作和批量上传错误。
+## 当前稳定能力
 
-## 核心流程
+- 通过网页上传标题 Excel 和图片 ZIP / 图片文件夹。
+- 按 Excel 里的「序号」和图片子文件夹名称匹配产品。
+- 自动忽略 `Thumbs.db` 等无用文件。
+- 可把本次上传的图片写入 OSS，同名对象会按本次上传内容覆盖。
+- 调用妙手 OpenAPI 创建公共采集箱产品、认领到 TikTok 采集箱，并套用保存好的模板参数。
+- 支持三个模板类型：`大地毯`、`非定制毛毯`、`定制毛毯`。
+- 生成本地任务结果和失败日志。
 
-Excel + 图片
-↓
-数据校验
-↓
-图片上传 OSS
-↓
-调用妙手 OpenAPI
-↓
-模板匹配
-↓
-创建 TikTok 商品
-↓
-批量处理
-↓
-输出结果
+## 不适合的场景
 
-## 技术栈
+- 还不建议直接用于完全不同类目、不同参数的全自动上货。
+- 还不建议开放给陌生公网用户使用。
+- 当前默认面向 TikTok 美国站。
 
-- Python
-- OpenPyXL
-- HTTP API
-- HMAC Signature
-- Alibaba Cloud OSS
-- HTML / CSS
-- Python HTTP Server
-- Multithreading
-- JSON / SQL
+## 目录
 
-## 核心功能
+- [配置说明](docs/configuration.md)
+- [模板批量上传使用说明](docs/template-batch-upload.md)
+- [部署说明](docs/deployment.md)
+- [常见问题](docs/troubleshooting.md)
+- [公开发布前检查清单](docs/release-checklist.md)
+- [Codex Skill 说明](SKILL.md)
+- [Agent 使用说明](docs/agent-usage.md)
 
-- Excel 商品数据读取
-- 商品图片自动匹配
-- ZIP 图片上传
-- OSS 自动上传
-- 妙手 OpenAPI 集成
-- API 限流自动重试
-- 504 超时重试
-- 商品模板自动识别
-- 批量任务执行
-- Web UI
-- 登录与账号管理
-- 任务进度显示
-- 错误报告
-- 自动化测试
+`AGENTS.md` 和 `CLAUDE.md` 已经提供给 Codex、Claude Code 这类 agent 使用。agent 进入仓库后会先看到项目边界，再按 `SKILL.md` 和 `docs/agent-usage.md` 操作网页。
 
-## 项目结构
+## 快速开始
 
-batch_tiktok_collect.py
-核心商品批量发布逻辑
+1. 安装 Python 3.10 或更新版本。
+2. 安装依赖：
 
-web_app.py
-Web 页面、账号管理、任务处理
+```bash
+python -m pip install -r requirements.txt
+```
 
-test_web_app.py
-自动化测试
+3. 复制示例配置：
 
-schema.sql
-数据库结构
+```bash
+copy .env.example .env
+copy accounts.example.json accounts.json
+```
 
-accounts.example.json
-账号配置示例
+4. 按 [配置说明](docs/configuration.md) 填写自己的 OSS 和妙手账号信息。
 
-.env.example
-环境变量配置示例
+   公开仓库不会包含任何可用密钥。每个人下载后都要在本机或服务器的 `.env` 里填写自己的 `OSS_BUCKET`、`OSS_ENDPOINT`、`OSS_REGION` 和 OSS AccessKey，程序才会把上传图片保存到他自己的 OSS。
 
-## 项目状态
+5. 启动网页：
 
-当前版本已经可以完成固定流程的商品批量发布。
-该项目目前采用确定性 Workflow，而不是 Agent 架构。
+```bash
+python web_app.py --host 127.0.0.1 --port 8002
+```
 
-原因是商品上传流程步骤明确，
-使用 Workflow 可以获得更高的稳定性和可控性。
+Windows 也可以直接运行：
 
-未来计划加入 AI Agent，用于处理异常判断、
-标题优化和自动决策。
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1
+```
+
+6. 浏览器打开：
+
+```text
+http://127.0.0.1:8002/
+```
+
+7. 先打开「系统自检」，确认没有红色失败项，再使用「模板批量上传」。
+
+也可以在命令行运行自检：
+
+```bash
+python scripts/check_setup.py
+```
+
+公开发布到 GitHub 前建议再运行：
+
+```bash
+python scripts/check_public_release.py
+```
+
+服务器部署时请参考 [部署说明](docs/deployment.md)。
+
+## 安全提醒
+
+不要把这些文件提交到 GitHub：
+
+- `.env`
+- `accounts.json`
+- `ai_settings.json`
+- `runs/`
+- `uploads/`
+- `app.log`
+- `app.err`
+
+仓库里的 `.gitignore` 已经默认排除了这些文件。公开仓库只应提交示例配置和代码。
+
+如果把网页开放给团队或公网访问，请在服务器 `.env` 中设置 `WEB_ACCESS_PASSWORD` 和 `WEB_SESSION_SECRET`。否则任何能访问该地址的人都可能使用服务器上保存的妙手账号。

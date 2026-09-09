@@ -1,0 +1,152 @@
+# 部署说明
+
+本项目可以本地运行，也可以部署到云服务器给小团队使用。
+
+## 本地运行
+
+先复制并填写配置文件：
+
+```bash
+cp .env.example .env
+cp accounts.example.json accounts.json
+```
+
+Windows 可用 `copy`。`.env` 里至少要填写你自己的 `OSS_BUCKET`、`OSS_ENDPOINT`、`OSS_REGION`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`。
+
+```bash
+python -m pip install -r requirements.txt
+python scripts/check_setup.py
+python web_app.py --host 127.0.0.1 --port 8002
+```
+
+Windows 可以使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:8002/
+```
+
+## 局域网或服务器运行
+
+先在服务器 `.env` 里填写你自己的 OSS 配置和网页访问保护：
+
+```env
+OSS_BUCKET=your_bucket_name
+OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com
+OSS_REGION=cn-shenzhen
+OSS_ACCESS_KEY_ID=your_access_key_id
+OSS_ACCESS_KEY_SECRET=your_access_key_secret
+WEB_ACCESS_PASSWORD=一串足够长的访问密码
+WEB_SESSION_SECRET=另一串足够长的随机字符
+```
+
+这些值不要提交到 GitHub。没有配置访问保护时，任何能访问 `http://服务器IP:8002/` 的人都可能打开网页并使用服务器上已保存的妙手账号。
+
+```bash
+bash scripts/run_server.sh
+```
+
+然后访问：
+
+```text
+http://服务器IP:8002/
+```
+
+首次部署建议先打开：
+
+```text
+http://服务器IP:8002/check
+```
+
+确认系统自检没有红色失败项后，再让团队使用模板批量上传。
+
+如果部署在阿里云服务器，需要同时放行：
+
+- 阿里云安全组入方向 TCP `8002`
+- 服务器系统防火墙 TCP `8002`
+
+## 宝塔 / Alibaba Cloud Linux 示例
+
+如果 Python 3.10 安装在宝塔 Python 项目管理器中，可能的启动命令类似：
+
+```bash
+cd /www/wwwroot/miaoshou
+/www/server/python_manager/versions/3.10.0/bin/python3 -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+/www/server/python_manager/versions/3.10.0/bin/python3 scripts/check_setup.py
+nohup /www/server/python_manager/versions/3.10.0/bin/python3 web_app.py --host 0.0.0.0 --port 8002 > app.log 2>&1 &
+```
+
+查看日志：
+
+```bash
+tail -50 app.log
+tail -50 app.err
+```
+
+## 长期运行建议
+
+`nohup` 适合临时测试。长期每天给团队使用时，建议改成 systemd 或宝塔的进程守护方式，保证服务器重启后自动恢复。
+
+systemd 示例文件在：
+
+```text
+scripts/miaoshou.service.example
+```
+
+内容示例：
+
+```ini
+[Unit]
+Description=Miaoshou TikTok Upload Tool
+After=network.target
+
+[Service]
+WorkingDirectory=/www/wwwroot/miaoshou
+ExecStart=/www/server/python_manager/versions/3.10.0/bin/python3 /www/wwwroot/miaoshou/web_app.py --host 0.0.0.0 --port 8002
+Restart=always
+RestartSec=5
+User=www
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## 更新代码
+
+更新前先备份真实配置：
+
+```bash
+cp .env .env.bak
+cp accounts.json accounts.json.bak
+```
+
+更新代码后不要覆盖：
+
+- `.env`
+- `accounts.json`
+- `ai_settings.json`
+- `runs/`
+- `uploads/`
+
+## 宝塔临时安装包清理
+
+之前通过宝塔上传的 `miaoshou-*.zip`、`deploy/*.zip` 只是代码同步用的临时安装包。确认新版本已经解压到项目目录、网页能正常打开、GitHub 也已经保存后，这些压缩包可以删除。
+
+不要删除这些真实配置和运行数据：
+
+- `.env`
+- `accounts.json`
+- `ai_settings.json`
+- `data/`
+- `runs/`
+- `uploads/`
+- 当前正在运行的 `.py`、`docs/`、`miaoshou_tool/`、`scripts/`
+
+如果不确定某个文件能不能删，优先先保留，或者下载备份后再清理。
+
+公开发布前建议再过一遍 [公开发布前检查清单](release-checklist.md)。

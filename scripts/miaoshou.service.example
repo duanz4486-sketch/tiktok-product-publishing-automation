@@ -1,0 +1,14 @@
+[Unit]
+Description=Miaoshou TikTok Upload Tool
+After=network.target
+
+[Service]
+WorkingDirectory=/www/wwwroot/miaoshou
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/www/server/python_manager/versions/3.10.0/bin/python3 /www/wwwroot/miaoshou/web_app.py --host 0.0.0.0 --port 8002
+Restart=always
+RestartSec=5
+User=www
+
+[Install]
+WantedBy=multi-user.target
