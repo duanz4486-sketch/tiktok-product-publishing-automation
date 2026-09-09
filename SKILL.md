@@ -23,12 +23,13 @@ The single-product / single-link intelligent upload page exists in the app but i
 
 ## Agent Quick Start
 
-1. Inspect the repository root and confirm these files exist: `web_app.py`, `requirements.txt`, `.env.example`, `accounts.example.json`, and `docs/`.
-2. Run `python scripts/check_setup.py` before guiding real uploads when the local environment is available.
-3. If the website is already deployed, ask the user for the deployment URL or use the URL already visible in the conversation. Open it with a browser tool when available.
-4. If the user wants local use, start the app with `python web_app.py --host 127.0.0.1 --port 8002` or `powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1`, then open `http://127.0.0.1:8002/`.
-5. If the user wants team/server use, point them to `docs/deployment.md` and require the server `.env` access gate before exposing the URL.
-6. Use `/check` for system self-check, `/accounts` for Miaoshou account setup, and `/` for the stable template batch upload workflow.
+1. Inspect the repository root and confirm these files exist: `web_app.py`, `requirements.txt`, `.env.example`, `accounts.example.json`, `docs/`, and `docs/first-time-setup.md`.
+2. For a first-time user, guide `docs/first-time-setup.md` first. It is the source of truth for local setup, server setup, OSS configuration, Miaoshou account setup, and the stable upload workflow.
+3. Run `python scripts/check_setup.py` before guiding real uploads when the local environment is available.
+4. If the website is already deployed, ask the user for the deployment URL or use the URL already visible in the conversation. Open it with a browser tool when available.
+5. If the user wants local use, start the app with `python web_app.py --host 127.0.0.1 --port 8002` or `powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1`, then open `http://127.0.0.1:8002/`.
+6. If the user wants team/server use, point them to `docs/deployment.md` and require the server `.env` access gate before exposing the URL.
+7. Use `/check` for system self-check, `/accounts` for Miaoshou account setup, and `/` for the stable template batch upload workflow.
 
 ## Website Operating Flow
 
@@ -62,6 +63,7 @@ For a stable batch upload, guide the user through this sequence:
 
 ## References
 
+- For a first-time user installing from GitHub, read `docs/first-time-setup.md`.
 - For agent-specific website usage, read `docs/agent-usage.md`.
 - For environment variables and account examples, read `docs/configuration.md`.
 - For the stable user workflow, read `docs/template-batch-upload.md`.

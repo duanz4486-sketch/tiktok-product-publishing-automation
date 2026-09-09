@@ -13,6 +13,7 @@
 - `ai_settings.example.json`
 - `requirements.txt`
 - `docs/`
+- `docs/first-time-setup.md`
 - `scripts/check_setup.py`
 - `scripts/run_local.ps1`
 - `scripts/run_server.sh`
