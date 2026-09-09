@@ -22,6 +22,7 @@
 
 ## 目录
 
+- [首次部署和使用](docs/first-time-setup.md)
 - [配置说明](docs/configuration.md)
 - [模板批量上传使用说明](docs/template-batch-upload.md)
 - [部署说明](docs/deployment.md)
@@ -33,6 +34,8 @@
 `AGENTS.md` 和 `CLAUDE.md` 已经提供给 Codex、Claude Code 这类 agent 使用。agent 进入仓库后会先看到项目边界，再按 `SKILL.md` 和 `docs/agent-usage.md` 操作网页。
 
 ## 快速开始
+
+如果你是第一次从 GitHub 获取这个项目，建议先按 [首次部署和使用](docs/first-time-setup.md) 完整走一遍。
 
 1. 安装 Python 3.10 或更新版本。
 2. 安装依赖：
@@ -85,6 +88,16 @@ python scripts/check_public_release.py
 ```
 
 服务器部署时请参考 [部署说明](docs/deployment.md)。
+
+## 给 Agent 使用
+
+如果你想让 Codex、Claude Code 或类似 agent 帮你部署和操作这个工具，可以直接告诉它：
+
+```text
+请先阅读这个仓库的 SKILL.md，然后按 docs/first-time-setup.md 帮我部署妙手 TikTok 批量上货工具。
+```
+
+agent 应该先检查配置和环境，再启动网页，并指导你使用当前稳定的「模板批量上传」入口。公开版本不包含任何作者自己的 OSS、妙手或 AI 密钥。
 
 ## 安全提醒
 

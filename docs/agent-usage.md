@@ -6,9 +6,10 @@
 
 这是「妙手 TikTok 批量上货工具」的操作 Skill。它不是一个远程 SaaS 账号，也不自带可公开使用的网址。agent 应该根据用户当前环境做三件事：
 
-1. 找到或启动这个仓库里的网页程序。
-2. 打开用户自己的本地或服务器网址。
-3. 按稳定流程指导用户上传 Excel 和图片，处理结果和错误。
+1. 帮第一次使用的人按 `docs/first-time-setup.md` 完成部署和配置。
+2. 找到或启动这个仓库里的网页程序。
+3. 打开用户自己的本地或服务器网址。
+4. 按稳定流程指导用户上传 Excel 和图片，处理结果和错误。
 
 当前稳定能力是「模板批量上传」。单产品智能上传、AI 自动补软参数、不同类目自由上货还在开发和完善中，除非用户明确要求测试，否则不要当作稳定功能介绍。
 
@@ -23,6 +24,7 @@
 如果用户在本机运行：
 
 ```bash
+python -m pip install -r requirements.txt
 python scripts/check_setup.py
 python web_app.py --host 127.0.0.1 --port 8002
 ```
@@ -41,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1
 
 如果用户在服务器运行：
 
-1. 先按 `docs/deployment.md` 部署。
+1. 先按 `docs/first-time-setup.md` 和 `docs/deployment.md` 部署。
 2. 确认云服务器安全组和系统防火墙开放实际端口。
 3. 确认 `.env` 里设置了 `WEB_ACCESS_PASSWORD` 和 `WEB_SESSION_SECRET`。
 4. 用服务器公网 IP 或用户自己的域名访问。
