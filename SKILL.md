@@ -1,11 +1,13 @@
 ---
 name: miaoshou-tiktok-upload
-description: Operate and maintain the Miaoshou TikTok template batch upload web tool, especially configuration, deployment, Excel/image matching, OSS upload, and troubleshooting.
+description: Use the Miaoshou TikTok upload web app: launch or open the site, guide template batch uploads, configure accounts safely, and troubleshoot Excel, image, OSS, and Miaoshou API failures.
 ---
 
 # Miaoshou TikTok Upload
 
-Use this skill when working on this repository's Miaoshou TikTok product upload tool.
+Use this skill when a user wants an agent such as Codex or Claude Code to help operate, deploy, or troubleshoot this repository's Miaoshou TikTok product upload website.
+
+This skill is not the hosted website. It teaches the agent how to find, launch, or open the website, then guide the user through the stable upload workflow.
 
 ## Current Supported Workflow
 
@@ -19,6 +21,28 @@ The stable workflow is template batch upload:
 
 The single-product / single-link intelligent upload page exists in the app but is still under active development. Do not document it as a stable user workflow until the user confirms it is ready.
 
+## Agent Quick Start
+
+1. Inspect the repository root and confirm these files exist: `web_app.py`, `requirements.txt`, `.env.example`, `accounts.example.json`, and `docs/`.
+2. Run `python scripts/check_setup.py` before guiding real uploads when the local environment is available.
+3. If the website is already deployed, ask the user for the deployment URL or use the URL already visible in the conversation. Open it with a browser tool when available.
+4. If the user wants local use, start the app with `python web_app.py --host 127.0.0.1 --port 8002` or `powershell -ExecutionPolicy Bypass -File scripts/run_local.ps1`, then open `http://127.0.0.1:8002/`.
+5. If the user wants team/server use, point them to `docs/deployment.md` and require the server `.env` access gate before exposing the URL.
+6. Use `/check` for system self-check, `/accounts` for Miaoshou account setup, and `/` for the stable template batch upload workflow.
+
+## Website Operating Flow
+
+For a stable batch upload, guide the user through this sequence:
+
+1. Open the website.
+2. Confirm at least one Miaoshou account exists and is unlocked only while editing settings.
+3. Run system self-check and resolve red failures.
+4. On the template batch page, select the Miaoshou account and product template type.
+5. Upload the current title Excel and current image ZIP or image folder.
+6. Keep precheck enabled for the first pass.
+7. Review mismatched sequence IDs, missing images, OSS upload errors, and Miaoshou API errors.
+8. Run the real upload only after precheck is clean or the user accepts the failed items.
+
 ## Operational Invariants
 
 - Treat the current uploaded Excel and current uploaded image source as authoritative.
@@ -26,9 +50,19 @@ The single-product / single-link intelligent upload page exists in the app but i
 - Report Excel-only IDs as missing image folders and image-only IDs as missing titles.
 - When OSS upload is enabled, current uploads may overwrite same-name OSS objects.
 - Never expose or commit `.env`, `accounts.json`, `ai_settings.json`, logs, uploads, or run output.
+- Do not hardcode the maintainer's server URL in public docs or Skill files. Public users should run their own local or server deployment, or explicitly provide their own URL.
+- The single-product intelligent upload and AI soft-parameter workflow are in development; mention them as experimental unless the user explicitly asks to test them.
+
+## Expected User Inputs
+
+- Title Excel: must contain a sequence column such as `序号` and a title column such as `标题`, `最终英文标题`, or equivalent.
+- Images: ZIP, folder, or uploaded image source whose product folders are named by sequence ID for batch upload.
+- Miaoshou account: display name, Miaoshou account identifier, App Key, App Secret, and template IDs or discovered template matches.
+- OSS: configured privately through `.env`; same-name uploads may overwrite existing objects.
 
 ## References
 
+- For agent-specific website usage, read `docs/agent-usage.md`.
 - For environment variables and account examples, read `docs/configuration.md`.
 - For the stable user workflow, read `docs/template-batch-upload.md`.
 - For local or server deployment, read `docs/deployment.md`.

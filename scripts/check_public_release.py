@@ -8,6 +8,8 @@ from pathlib import Path
 
 REQUIRED_FILES = [
     ".gitignore",
+    "AGENTS.md",
+    "CLAUDE.md",
     "README.md",
     "SKILL.md",
     ".env.example",
@@ -19,6 +21,7 @@ REQUIRED_FILES = [
     "docs/template-batch-upload.md",
     "docs/troubleshooting.md",
     "docs/release-checklist.md",
+    "docs/agent-usage.md",
     "miaoshou_tool/__init__.py",
     "miaoshou_tool/account_pages.py",
     "miaoshou_tool/accounts.py",
@@ -96,6 +99,13 @@ REQUIRED_GITIGNORE_PATTERNS = [
     "miaoshou-*.zip",
 ]
 
+REQUIRED_SKILL_PHRASES = [
+    "Agent Quick Start",
+    "docs/agent-usage.md",
+    "template batch upload",
+    "Never expose or commit",
+]
+
 
 def _run_git(root: Path, args: list[str]) -> list[str]:
     output = subprocess.check_output(["git", *args], cwd=root, text=True, encoding="utf-8")
@@ -144,6 +154,15 @@ def main() -> int:
             warnings.append("Missing .gitignore patterns: " + ", ".join(missing_ignores))
     else:
         errors.append(".gitignore is missing.")
+
+    skill_file = root / "SKILL.md"
+    if skill_file.exists():
+        skill_text = skill_file.read_text(encoding="utf-8", errors="ignore")
+        missing_skill_phrases = [phrase for phrase in REQUIRED_SKILL_PHRASES if phrase not in skill_text]
+        if missing_skill_phrases:
+            errors.append("SKILL.md is missing agent operation guidance: " + ", ".join(missing_skill_phrases))
+    else:
+        errors.append("SKILL.md is missing.")
 
     large_files = []
     for path in tracked:

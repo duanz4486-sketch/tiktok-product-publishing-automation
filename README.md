@@ -28,6 +28,9 @@
 - [常见问题](docs/troubleshooting.md)
 - [公开发布前检查清单](docs/release-checklist.md)
 - [Codex Skill 说明](SKILL.md)
+- [Agent 使用说明](docs/agent-usage.md)
+
+`AGENTS.md` 和 `CLAUDE.md` 已经提供给 Codex、Claude Code 这类 agent 使用。agent 进入仓库后会先看到项目边界，再按 `SKILL.md` 和 `docs/agent-usage.md` 操作网页。
 
 ## 快速开始
 

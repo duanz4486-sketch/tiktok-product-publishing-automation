@@ -6,6 +6,8 @@
 
 - `README.md`
 - `SKILL.md`
+- `AGENTS.md`
+- `CLAUDE.md`
 - `.env.example`
 - `accounts.example.json`
 - `ai_settings.example.json`
@@ -15,6 +17,7 @@
 - `scripts/run_local.ps1`
 - `scripts/run_server.sh`
 - `scripts/miaoshou.service.example`
+- `docs/agent-usage.md`
 
 ## 不能提交到 GitHub
 
@@ -43,6 +46,7 @@ python test_web_app.py
 - 访问密码没有写进 README、代码、截图或 GitHub。
 - 阿里云安全组和系统防火墙只开放实际需要的端口。
 - 妙手账号和 AI/OSS 密钥只存在服务器本地配置文件中。
+- `SKILL.md` 和 `docs/agent-usage.md` 没有硬编码维护者自己的公网地址、访问密码或任何密钥。
 
 ## 当前稳定入口
 
