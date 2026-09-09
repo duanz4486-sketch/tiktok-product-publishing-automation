@@ -42,6 +42,7 @@ REQUIRED_FILES = [
     "miaoshou_tool/miaoshou_api.py",
     "miaoshou_tool/oss_upload.py",
     "miaoshou_tool/page_shell.py",
+    "miaoshou_tool/page_requests.py",
     "miaoshou_tool/publishing.py",
     "miaoshou_tool/rendering.py",
     "miaoshou_tool/self_check.py",

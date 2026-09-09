@@ -14,24 +14,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, post as miaoshou_post, read_items, run_batch
-from miaoshou_tool import account_pages
 from miaoshou_tool import accounts as account_module
 from miaoshou_tool import ai as ai_module
-from miaoshou_tool import ai_pages
 from miaoshou_tool import ai_requests
 from miaoshou_tool import batch_jobs
-from miaoshou_tool import batch_pages
 from miaoshou_tool import batch_requests
 from miaoshou_tool import config as config_module
 from miaoshou_tool import errors as error_module
 from miaoshou_tool import files as file_module
 from miaoshou_tool import forms as form_module
-from miaoshou_tool import job_pages
 from miaoshou_tool import jobs as job_module
 from miaoshou_tool import json_io
 from miaoshou_tool import miaoshou_api
 from miaoshou_tool import oss_upload
 from miaoshou_tool import page_shell
+from miaoshou_tool import page_requests
 from miaoshou_tool import publishing as publishing_module
 from miaoshou_tool import rendering
 from miaoshou_tool import self_check
@@ -394,43 +391,67 @@ def render_setup_needed() -> bytes:
 
 
 def render_release_check(username: str) -> bytes:
-    report = self_check.run_release_check(ROOT, ACCOUNTS_PATH)
-    return system_pages.render_release_check(report, len(all_account_ids()))
+    return page_requests.render_release_check(
+        {
+            "run_release_check": self_check.run_release_check,
+            "root": ROOT,
+            "accounts_path": ACCOUNTS_PATH,
+            "all_account_ids": all_account_ids,
+        }
+    )
 
 
 def render_account_row(account_id: str, account: dict) -> str:
-    return account_pages.render_account_row(account_id, account, TEMPLATES)
+    return page_requests.render_account_row(account_id, account, {"templates": TEMPLATES})
 
 
 def render_accounts(username: str, message: str = "", error: str = "") -> bytes:
-    config = load_accounts_config()
-    account_ids = all_account_ids(config)
-    return account_pages.render_accounts(config, account_ids, TEMPLATES, message, error)
+    return page_requests.render_accounts(
+        message,
+        error,
+        {
+            "load_accounts_config": load_accounts_config,
+            "all_account_ids": all_account_ids,
+            "templates": TEMPLATES,
+        },
+    )
 
 
 def render_account_confirm(username: str, token: str) -> bytes:
-    with PENDING_ACCOUNTS_LOCK:
-        pending = PENDING_ACCOUNTS.get(token)
-    return account_pages.render_account_confirm(token, pending, list(TEMPLATES), len(all_account_ids()))
+    return page_requests.render_account_confirm(
+        token,
+        {
+            "pending_accounts": PENDING_ACCOUNTS,
+            "pending_accounts_lock": PENDING_ACCOUNTS_LOCK,
+            "templates": TEMPLATES,
+            "all_account_ids": all_account_ids,
+        },
+    )
 
 
 def render_home(username: str) -> bytes:
-    config = load_accounts_config()
-    account_ids = all_account_ids(config)
-    accounts = config.get("accounts", {})
-    available_accounts = [(account_id, accounts[account_id]) for account_id in account_ids if account_id in accounts]
-    if not available_accounts:
-        return render_setup_needed()
-    with JOBS_LOCK:
-        job_items = list(JOBS.items())
-    return batch_pages.render_home(available_accounts, account_ids, job_items, TEMPLATES, DEFAULT_TEMPLATE)
+    return page_requests.render_home(
+        {
+            "load_accounts_config": load_accounts_config,
+            "all_account_ids": all_account_ids,
+            "jobs": JOBS,
+            "jobs_lock": JOBS_LOCK,
+            "templates": TEMPLATES,
+            "default_template": DEFAULT_TEMPLATE,
+        }
+    )
 
 
 def render_job(job_id: str, username: str | None = None) -> bytes:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-    account_count = len(all_account_ids()) if username else 0
-    return job_pages.render_job(job_id, job, account_count, bool(username))
+    return page_requests.render_job(
+        job_id,
+        username,
+        {
+            "jobs": JOBS,
+            "jobs_lock": JOBS_LOCK,
+            "all_account_ids": all_account_ids,
+        },
+    )
 
 
 def render_attr_control(attr: dict) -> str:
@@ -450,58 +471,46 @@ def render_category_picker(categories: list[dict], cid_text: str) -> str:
 
 
 def render_single(username: str, query: dict[str, list[str]] | None = None, error: str = "") -> bytes:
-    query = query or {}
-    config = load_accounts_config()
-    accounts = config.get("accounts", {})
-    account_ids = [account_id for account_id in all_account_ids(config) if account_id in accounts]
-    if not account_ids:
-        return render_setup_needed()
-    selected_account_id = query.get("account_id", [account_ids[0]])[0]
-    if selected_account_id not in account_ids:
-        selected_account_id = account_ids[0]
-    account = accounts[selected_account_id]
-    account_options = "\n".join(
-        f'<option value="{e(account_id)}" {"selected" if account_id == selected_account_id else ""}>{e(accounts[account_id].get("name", account_id))}</option>'
-        for account_id in account_ids
-    )
-
-    cid_text = query.get("cid", [""])[0]
-    message_html = alert_html("error", error)
-    categories: list[dict] = []
-    shops: list[dict] = []
-    metadata: dict = {}
-    try:
-        credentials = account_credentials(account)
-        shops = get_tiktok_shops(credentials)
-        categories = load_categories(credentials)
-        if cid_text:
-            metadata = get_category_metadata(int(cid_text), credentials, [int(shop["shopId"]) for shop in shops[:3]])
-    except Exception as exc:
-        message_html += alert_html("error", exc)
-    return single_pages.render_single_page(
+    return page_requests.render_single(
         username,
-        len(account_ids),
-        account_options,
-        selected_account_id,
-        categories,
-        cid_text,
-        metadata,
-        shops,
-        message_html,
-        SINGLE_IMAGE_LIMIT,
+        query,
+        error,
+        {
+            "load_accounts_config": load_accounts_config,
+            "all_account_ids": all_account_ids,
+            "account_credentials": account_credentials,
+            "get_tiktok_shops": get_tiktok_shops,
+            "load_categories": load_categories,
+            "get_category_metadata": get_category_metadata,
+            "single_image_limit": SINGLE_IMAGE_LIMIT,
+        },
     )
 
 
 def render_ai_settings(username: str, message: str = "", error: str = "") -> bytes:
-    settings = load_ai_settings()
-    account_count = len(all_account_ids())
-    return ai_pages.render_ai_settings(settings, AI_PROVIDER_PRESETS, message, error, account_count)
+    return page_requests.render_ai_settings(
+        message,
+        error,
+        {
+            "load_ai_settings": load_ai_settings,
+            "all_account_ids": all_account_ids,
+            "ai_provider_presets": AI_PROVIDER_PRESETS,
+        },
+    )
 
 
 def render_failure_page(title: str, error: object, back_url: str, back_label: str, username: str | None = None) -> bytes:
-    account_count = len(all_account_ids()) if username else 0
-    detail = readable_error_text(error) or str(error)
-    return system_pages.render_failure_page(title, detail, back_url, back_label, bool(username), account_count)
+    return page_requests.render_failure_page(
+        title,
+        error,
+        back_url,
+        back_label,
+        username,
+        {
+            "all_account_ids": all_account_ids,
+            "readable_error_text": readable_error_text,
+        },
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
