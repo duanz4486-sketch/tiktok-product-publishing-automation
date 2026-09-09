@@ -102,7 +102,8 @@ Excel 或图片匹配失败：
 
 OSS 上传失败：
 
-- 检查 `.env` 里的 OSS 配置是否存在。
+- 检查 `.env` 里的 `OSS_BUCKET`、`OSS_ENDPOINT`、`OSS_REGION`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` 是否存在。
+- 确认这些 OSS 配置属于当前部署者自己的阿里云账号，不要沿用公开仓库作者的配置。
 - 检查 AccessKey 权限是否有 OSS 写入权限。
 - 检查 Bucket、Endpoint、目录配置是否正确。
 

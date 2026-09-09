@@ -1,6 +1,7 @@
 from pathlib import Path
 import io
 import json
+import os
 import tempfile
 import zipfile
 
@@ -282,7 +283,14 @@ def test_batch_endpoints_are_declared() -> None:
 
 def test_release_check_reports_template_batch_readiness() -> None:
     root = Path(tempfile.mkdtemp())
-    (root / ".env").write_text("OSS_ACCESS_KEY_ID=id\nOSS_ACCESS_KEY_SECRET=secret\n", encoding="utf-8")
+    (root / ".env").write_text(
+        "OSS_BUCKET=test-bucket\n"
+        "OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com\n"
+        "OSS_REGION=cn-shenzhen\n"
+        "OSS_ACCESS_KEY_ID=id\n"
+        "OSS_ACCESS_KEY_SECRET=secret\n",
+        encoding="utf-8",
+    )
     (root / ".gitignore").write_text(".env\naccounts.json\nai_settings.json\nruns/\nuploads/\n", encoding="utf-8")
     accounts_path = root / "accounts.json"
     json_io.write(
@@ -309,7 +317,14 @@ def test_release_check_reports_template_batch_readiness() -> None:
 
 def test_release_check_flags_missing_miaoshou_templates() -> None:
     root = Path(tempfile.mkdtemp())
-    (root / ".env").write_text("OSS_ACCESS_KEY_ID=id\nOSS_ACCESS_KEY_SECRET=secret\n", encoding="utf-8")
+    (root / ".env").write_text(
+        "OSS_BUCKET=test-bucket\n"
+        "OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com\n"
+        "OSS_REGION=cn-shenzhen\n"
+        "OSS_ACCESS_KEY_ID=id\n"
+        "OSS_ACCESS_KEY_SECRET=secret\n",
+        encoding="utf-8",
+    )
     accounts_path = root / "accounts.json"
     json_io.write(
         accounts_path,
@@ -882,6 +897,7 @@ def test_ai_settings_page_uses_presets_without_rendering_key() -> None:
 def test_upload_single_images_keeps_order() -> None:
     original_put = web_app.put_oss_object
     temp_root = Path(tempfile.mkdtemp())
+    old_env = {name: os.environ.get(name) for name in ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")}
     files = []
     for name in ["1.jpg", "2.jpg", "3.jpg"]:
         path = temp_root / name
@@ -889,16 +905,52 @@ def test_upload_single_images_keeps_order() -> None:
         files.append(path)
     calls = []
     try:
+        os.environ["OSS_BUCKET"] = "test-bucket"
+        os.environ["OSS_ENDPOINT"] = "oss-cn-shenzhen.aliyuncs.com"
+        os.environ["OSS_REGION"] = "cn-shenzhen"
         web_app.put_oss_object = lambda file_path, object_key: calls.append(object_key)  # type: ignore[assignment]
         urls = web_app.upload_single_images(files, "single/test")
     finally:
         web_app.put_oss_object = original_put  # type: ignore[assignment]
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     assert urls == [
-        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/1.jpg",
-        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/2.jpg",
-        "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/3.jpg",
+        "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/1.jpg",
+        "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/2.jpg",
+        "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/3.jpg",
     ]
     assert sorted(calls) == ["single/test/1.jpg", "single/test/2.jpg", "single/test/3.jpg"]
+
+
+def test_oss_config_requires_deployer_bucket_settings() -> None:
+    original_loader = web_app.oss_upload.load_local_env
+    old_env = {name: os.environ.get(name) for name in ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")}
+    try:
+        web_app.oss_upload.load_local_env = lambda: None  # type: ignore[assignment]
+        for name in old_env:
+            os.environ.pop(name, None)
+        try:
+            web_app.oss_upload.oss_config()
+        except RuntimeError as exc:
+            assert "OSS_BUCKET" in str(exc)
+            assert "公开部署" in str(exc)
+        else:
+            raise AssertionError("oss_config should reject missing bucket settings")
+
+        os.environ["OSS_BUCKET"] = "test-bucket"
+        os.environ["OSS_ENDPOINT"] = "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/"
+        os.environ["OSS_REGION"] = "cn-shenzhen"
+        assert web_app.oss_upload.object_url("folder/a b.jpg") == "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/folder/a%20b.jpg"
+    finally:
+        web_app.oss_upload.load_local_env = original_loader  # type: ignore[assignment]
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_unified_single_image_upload_accepts_images_and_zip() -> None:
@@ -956,17 +1008,26 @@ def test_batch_folder_upload_preserves_sequence_folders() -> None:
 def test_upload_single_video_uses_video_folder() -> None:
     original_put = web_app.put_oss_object
     temp_root = Path(tempfile.mkdtemp())
+    old_env = {name: os.environ.get(name) for name in ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION")}
     file_path = temp_root / "main video.mp4"
     file_path.write_bytes(b"x")
     calls = []
     try:
+        os.environ["OSS_BUCKET"] = "test-bucket"
+        os.environ["OSS_ENDPOINT"] = "oss-cn-shenzhen.aliyuncs.com"
+        os.environ["OSS_REGION"] = "cn-shenzhen"
         web_app.put_oss_object = lambda uploaded_path, object_key: calls.append((uploaded_path, object_key))  # type: ignore[assignment]
         url = web_app.upload_single_video(file_path, "single/test")
     finally:
         web_app.put_oss_object = original_put  # type: ignore[assignment]
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     assert calls == [(file_path, "single/test/video/main video.mp4")]
-    assert url == "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com/single/test/video/main%20video.mp4"
+    assert url == "https://test-bucket.oss-cn-shenzhen.aliyuncs.com/single/test/video/main%20video.mp4"
 
 
 def test_single_form_renders_ai_suggestion_button() -> None:
@@ -1203,6 +1264,7 @@ if __name__ == "__main__":
     test_ai_description_policy_blocks_banned_words()
     test_ai_settings_page_uses_presets_without_rendering_key()
     test_upload_single_images_keeps_order()
+    test_oss_config_requires_deployer_bucket_settings()
     test_unified_single_image_upload_accepts_images_and_zip()
     test_batch_folder_upload_preserves_sequence_folders()
     test_upload_single_video_uses_video_folder()

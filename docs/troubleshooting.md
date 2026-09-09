@@ -6,7 +6,7 @@
 
 常见项：
 
-- 没有 `.env`：复制 `.env.example` 为 `.env`，填写 OSS 密钥。
+- 没有 `.env`：复制 `.env.example` 为 `.env`，填写自己的 OSS 配置。
 - 没有 `accounts.json`：复制 `accounts.example.json` 为 `accounts.json`，或在网页新增妙手账号。
 - 妙手账号缺模板 ID：进入「妙手账号管理」重新识别或手动填写模板 ID。
 
@@ -80,7 +80,8 @@ python scripts/check_public_release.py
 
 检查：
 
-- `.env` 是否配置 `OSS_ACCESS_KEY_ID` 和 `OSS_ACCESS_KEY_SECRET`。
+- `.env` 是否配置 `OSS_BUCKET`、`OSS_ENDPOINT`、`OSS_REGION`、`OSS_ACCESS_KEY_ID` 和 `OSS_ACCESS_KEY_SECRET`。
+- `OSS_ENDPOINT` 是否只填外网 Endpoint 域名，不要带 `https://`。
 - RAM 用户是否有 OSS 写入权限。
 - Bucket 是否允许读取生成后的图片 URL。
 - 图片格式是否是支持格式。

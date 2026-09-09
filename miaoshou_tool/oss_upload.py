@@ -14,10 +14,39 @@ from typing import Callable
 from batch_tiktok_collect import VALID_IMAGE_EXTS
 
 from .accounts import load_local_env
-from .config import OSS_BUCKET, OSS_ENDPOINT, OSS_REGION
 
 
 PutObject = Callable[[Path, str], None]
+
+
+def normalize_oss_endpoint(endpoint: str, bucket: str) -> str:
+    cleaned = endpoint.strip().replace("https://", "", 1).replace("http://", "", 1).strip("/")
+    if bucket and cleaned.startswith(f"{bucket}."):
+        cleaned = cleaned[len(bucket) + 1 :]
+    return cleaned
+
+
+def oss_config() -> tuple[str, str, str]:
+    load_local_env()
+    bucket = (os.getenv("OSS_BUCKET") or "").strip()
+    endpoint = normalize_oss_endpoint(os.getenv("OSS_ENDPOINT") or "", bucket)
+    region = (os.getenv("OSS_REGION") or "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("OSS_BUCKET", bucket),
+            ("OSS_ENDPOINT", endpoint),
+            ("OSS_REGION", region),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "未配置 OSS 存储空间信息。请在 .env 里填写 "
+            + "、".join(missing)
+            + "；公开部署时必须使用你自己的阿里云 OSS。"
+        )
+    return bucket, endpoint, region
 
 
 def oss_credentials() -> tuple[str, str, str]:
@@ -31,13 +60,14 @@ def oss_credentials() -> tuple[str, str, str]:
 
 
 def put_oss_object(file_path: Path, object_key: str) -> None:
+    bucket, endpoint, region = oss_config()
     key_id, key_secret, token = oss_credentials()
     data = file_path.read_bytes()
     content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     now = datetime.now(timezone.utc)
     oss_date = now.strftime("%Y%m%dT%H%M%SZ")
     scope_date = now.strftime("%Y%m%d")
-    canonical_uri = "/" + urllib.parse.quote(f"{OSS_BUCKET}/{object_key}", safe="/~")
+    canonical_uri = "/" + urllib.parse.quote(f"{bucket}/{object_key}", safe="/~")
     canonical_headers = (
         f"content-type:{content_type}\n"
         "x-oss-content-sha256:UNSIGNED-PAYLOAD\n"
@@ -48,10 +78,10 @@ def put_oss_object(file_path: Path, object_key: str) -> None:
     hashed_request = hashlib.sha256(
         f"PUT\n{canonical_uri}\n\n{canonical_headers}\n\nUNSIGNED-PAYLOAD".encode()
     ).hexdigest()
-    scope = f"{scope_date}/{OSS_REGION}/oss/aliyun_v4_request"
+    scope = f"{scope_date}/{region}/oss/aliyun_v4_request"
     string_to_sign = f"OSS4-HMAC-SHA256\n{oss_date}\n{scope}\n{hashed_request}"
     signing_key = hmac.new(f"aliyun_v4{key_secret}".encode(), scope_date.encode(), hashlib.sha256).digest()
-    signing_key = hmac.new(signing_key, OSS_REGION.encode(), hashlib.sha256).digest()
+    signing_key = hmac.new(signing_key, region.encode(), hashlib.sha256).digest()
     signing_key = hmac.new(signing_key, b"oss", hashlib.sha256).digest()
     signing_key = hmac.new(signing_key, b"aliyun_v4_request", hashlib.sha256).digest()
     signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
@@ -63,7 +93,7 @@ def put_oss_object(file_path: Path, object_key: str) -> None:
     }
     if token:
         headers["x-oss-security-token"] = token
-    url = f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
+    url = f"https://{bucket}.{endpoint}/{urllib.parse.quote(object_key, safe='/')}"
     request = urllib.request.Request(url, data=data, headers=headers, method="PUT")
     with urllib.request.urlopen(request, timeout=60) as response:
         if response.status not in {200, 201}:
@@ -71,7 +101,8 @@ def put_oss_object(file_path: Path, object_key: str) -> None:
 
 
 def object_url(object_key: str) -> str:
-    return f"https://{OSS_BUCKET}.{OSS_ENDPOINT}/{urllib.parse.quote(object_key, safe='/')}"
+    bucket, endpoint, _region = oss_config()
+    return f"https://{bucket}.{endpoint}/{urllib.parse.quote(object_key, safe='/')}"
 
 
 def upload_images_to_oss(image_root: Path, image_prefix: str, seqs: list[int], put_object: PutObject = put_oss_object) -> int:
@@ -114,4 +145,3 @@ def upload_single_video(file_path: Path | None, object_prefix: str, put_object: 
     object_key = f"{object_prefix}/video/{file_path.name}"
     put_object(file_path, object_key)
     return object_url(object_key)
-

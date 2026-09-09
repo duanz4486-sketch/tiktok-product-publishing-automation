@@ -105,6 +105,16 @@ REQUIRED_SKILL_PHRASES = [
     "template batch upload",
     "Never expose or commit",
 ]
+REQUIRED_ENV_EXAMPLE_PATTERNS = [
+    "OSS_BUCKET=",
+    "OSS_ENDPOINT=",
+    "OSS_REGION=",
+    "OSS_ACCESS_KEY_ID=",
+    "OSS_ACCESS_KEY_SECRET=",
+]
+FORBIDDEN_PUBLIC_STRINGS = [
+    "duanhah-miaoshou-picture",
+]
 
 
 def _run_git(root: Path, args: list[str]) -> list[str]:
@@ -163,6 +173,32 @@ def main() -> int:
             errors.append("SKILL.md is missing agent operation guidance: " + ", ".join(missing_skill_phrases))
     else:
         errors.append("SKILL.md is missing.")
+
+    env_example = root / ".env.example"
+    if env_example.exists():
+        env_example_text = env_example.read_text(encoding="utf-8", errors="ignore")
+        missing_env_example = [pattern for pattern in REQUIRED_ENV_EXAMPLE_PATTERNS if pattern not in env_example_text]
+        if missing_env_example:
+            errors.append(".env.example is missing OSS setup fields: " + ", ".join(missing_env_example))
+    else:
+        errors.append(".env.example is missing.")
+
+    leaked_markers = []
+    for path in tracked:
+        if path.replace("\\", "/") == "scripts/check_public_release.py":
+            continue
+        file_path = root / path
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for marker in FORBIDDEN_PUBLIC_STRINGS:
+            if marker in text:
+                leaked_markers.append(f"{path}: {marker}")
+    if leaked_markers:
+        errors.append("Maintainer-specific OSS values are present in tracked files: " + ", ".join(sorted(leaked_markers)))
 
     large_files = []
     for path in tracked:

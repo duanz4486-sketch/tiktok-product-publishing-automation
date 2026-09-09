@@ -4,6 +4,15 @@
 
 ## 本地运行
 
+先复制并填写配置文件：
+
+```bash
+cp .env.example .env
+cp accounts.example.json accounts.json
+```
+
+Windows 可用 `copy`。`.env` 里至少要填写你自己的 `OSS_BUCKET`、`OSS_ENDPOINT`、`OSS_REGION`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`。
+
 ```bash
 python -m pip install -r requirements.txt
 python scripts/check_setup.py
@@ -24,14 +33,19 @@ http://127.0.0.1:8002/
 
 ## 局域网或服务器运行
 
-先在服务器 `.env` 里设置网页访问保护：
+先在服务器 `.env` 里填写你自己的 OSS 配置和网页访问保护：
 
 ```env
+OSS_BUCKET=your_bucket_name
+OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com
+OSS_REGION=cn-shenzhen
+OSS_ACCESS_KEY_ID=your_access_key_id
+OSS_ACCESS_KEY_SECRET=your_access_key_secret
 WEB_ACCESS_PASSWORD=一串足够长的访问密码
 WEB_SESSION_SECRET=另一串足够长的随机字符
 ```
 
-这两个值不要提交到 GitHub。没有配置访问保护时，任何能访问 `http://服务器IP:8002/` 的人都可能打开网页并使用服务器上已保存的妙手账号。
+这些值不要提交到 GitHub。没有配置访问保护时，任何能访问 `http://服务器IP:8002/` 的人都可能打开网页并使用服务器上已保存的妙手账号。
 
 ```bash
 bash scripts/run_server.sh

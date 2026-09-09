@@ -22,7 +22,6 @@ from openpyxl import load_workbook
 TITLE_ROOT = Path(r"D:\图片\标题\最终标题")
 LOCAL_IMAGE_ROOT = Path(r"D:\图片")
 MIAOSHOU_BASE_URL = os.environ.get("MIAOSHOU_BASE_URL", "https://openapi-erp.91miaoshou.com")
-OSS_BASE_URL = "https://duanhah-miaoshou-picture.oss-cn-shenzhen.aliyuncs.com"
 SHOP_ID = 13781675
 DEFAULT_BATCH = "万圣节测试"
 DEFAULT_TEMPLATE = "大地毯"
@@ -60,6 +59,32 @@ VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MiaoshouCredentials = tuple[str, str] | None
 
 
+def load_local_env() -> None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        os.environ.setdefault(name.strip(), value.strip().strip("\"'"))
+
+
+def oss_base_url() -> str:
+    load_local_env()
+    explicit = os.environ.get("OSS_BASE_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    bucket = os.environ.get("OSS_BUCKET", "").strip()
+    endpoint = os.environ.get("OSS_ENDPOINT", "").strip().replace("https://", "", 1).replace("http://", "", 1).strip("/")
+    if bucket and endpoint:
+        if endpoint.startswith(f"{bucket}."):
+            endpoint = endpoint[len(bucket) + 1 :]
+        return f"https://{bucket}.{endpoint}"
+    raise RuntimeError("缺少 OSS_BASE_URL，或 OSS_BUCKET / OSS_ENDPOINT。请在 .env 或环境变量里配置自己的 OSS。")
+
+
 def json_dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
@@ -74,6 +99,7 @@ def generate_sign(app_secret: str, path: str, timestamp: int, app_key: str, body
 
 
 def default_credentials() -> tuple[str, str]:
+    load_local_env()
     app_key = os.environ.get("MIAOSHOU_APP_KEY", "").strip()
     app_secret = os.environ.get("MIAOSHOU_APP_SECRET", "").strip()
     if not app_key or not app_secret:
@@ -199,8 +225,9 @@ def image_urls(
         raise ValueError(f"图片文件夹为空: {folder}")
     if len(files) > 15:
         raise ValueError(f"seq {seq}: 图片数量 {len(files)} 超过妙手限制 15 张")
+    base_url = oss_base_url()
     return [
-        f"{OSS_BASE_URL}/{urllib.parse.quote(f'{url_prefix}/{seq}/{file.name}', safe='/')}"
+        f"{base_url}/{urllib.parse.quote(f'{url_prefix}/{seq}/{file.name}', safe='/')}"
         for file in files
     ]
 

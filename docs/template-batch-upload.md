@@ -14,7 +14,7 @@
 
 1. 在妙手里准备好对应模板产品。
 2. 在网页「妙手账号管理」里保存妙手账号、App Key、App Secret 和模板 ID。
-3. 在 `.env` 中配置 OSS 密钥。
+3. 在 `.env` 中配置自己的 OSS Bucket、Endpoint、Region 和 AccessKey。
 4. 准备标题 Excel。
 5. 准备图片 ZIP 或图片文件夹。
 
@@ -91,4 +91,3 @@ Excel 文件名不需要和批次名、ZIP 文件名一致。
 - 本地日志路径
 
 失败项目不会阻止其他产品继续处理。
-

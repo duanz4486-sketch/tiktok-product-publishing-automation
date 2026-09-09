@@ -58,7 +58,7 @@ For a stable batch upload, guide the user through this sequence:
 - Title Excel: must contain a sequence column such as `序号` and a title column such as `标题`, `最终英文标题`, or equivalent.
 - Images: ZIP, folder, or uploaded image source whose product folders are named by sequence ID for batch upload.
 - Miaoshou account: display name, Miaoshou account identifier, App Key, App Secret, and template IDs or discovered template matches.
-- OSS: configured privately through `.env`; same-name uploads may overwrite existing objects.
+- OSS: every deployment must configure its own `OSS_BUCKET`, `OSS_ENDPOINT`, `OSS_REGION`, `OSS_ACCESS_KEY_ID`, and `OSS_ACCESS_KEY_SECRET` privately through `.env`; same-name uploads may overwrite existing objects.
 
 ## References
 

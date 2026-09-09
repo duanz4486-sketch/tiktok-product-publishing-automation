@@ -20,11 +20,14 @@ cp accounts.example.json accounts.json
 
 ## `.env`
 
-`.env` 用来保存 OSS 和可选 AI 配置。
+`.env` 用来保存 OSS、网页访问保护和可选 AI 配置。
 
 必填：
 
 ```env
+OSS_BUCKET=your_bucket_name
+OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com
+OSS_REGION=cn-shenzhen
 OSS_ACCESS_KEY_ID=your_access_key_id
 OSS_ACCESS_KEY_SECRET=your_access_key_secret
 ```
@@ -44,10 +47,25 @@ WEB_SESSION_SECRET=your_different_long_random_secret
 
 说明：
 
-- OSS 密钥用于把本次上传的图片写入阿里云 OSS。
+- `OSS_BUCKET` 是阿里云 OSS 的 Bucket 名称，例如 `my-product-images`。
+- `OSS_ENDPOINT` 是 Bucket 的外网 Endpoint 域名，不要带 `https://`，例如 `oss-cn-shenzhen.aliyuncs.com`。
+- `OSS_REGION` 是 Bucket 所在地域 ID，例如深圳是 `cn-shenzhen`。
+- OSS AccessKey 用于把本次上传的图片写入你自己的阿里云 OSS。
 - AI 密钥只给开发中的单产品 / 单个链接智能上传入口使用；模板批量上传不依赖 AI。
 - `WEB_ACCESS_PASSWORD` 和 `WEB_SESSION_SECRET` 用于保护网页入口。只在服务器或局域网共享时需要，本地自己测试可以不填。
 - 如果 `.env` 已经存在，不要用示例文件覆盖真实文件。
+
+## OSS 配置
+
+每个部署者都必须使用自己的 OSS，不要使用别人的 Bucket。
+
+在阿里云 OSS 控制台进入目标 Bucket 后，可以看到：
+
+- Bucket 名称：填入 `OSS_BUCKET`。
+- Endpoint / 访问域名：填入 `OSS_ENDPOINT`，只填类似 `oss-cn-shenzhen.aliyuncs.com` 的域名。
+- 地域：填入 `OSS_REGION`，例如 `cn-shenzhen`、`cn-hangzhou`。
+
+RAM 用户至少需要对这个 Bucket 有上传 Object 的权限。图片 URL 还需要能被妙手读取；如果妙手读取失败，优先检查 Bucket 读权限、防盗链和图片格式。
 
 ## 网页访问保护
 

@@ -136,18 +136,19 @@ def run_release_check(root: Path = ROOT, accounts_path: Path = ACCOUNTS_PATH) ->
             ".env 文件",
             "ok" if env_path.exists() else "error",
             ".env 已存在。" if env_path.exists() else "没有找到 .env。",
-            "复制 .env.example 为 .env，并填写 OSS 密钥。",
+            "复制 .env.example 为 .env，并填写自己的 OSS 配置。",
         )
     )
 
-    oss_missing = [name for name in ("OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET") if not _has_env(name, env_values)]
+    oss_required = ("OSS_BUCKET", "OSS_ENDPOINT", "OSS_REGION", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET")
+    oss_missing = [name for name in oss_required if not _has_env(name, env_values)]
     checks.append(
         _check(
             "oss",
             "OSS 配置",
             "ok" if not oss_missing else "error",
             "OSS 必需配置已填写。" if not oss_missing else "缺少 " + "、".join(oss_missing),
-            "在 .env 里填写阿里云 OSS AccessKey。",
+            "在 .env 里填写你的阿里云 OSS Bucket、Endpoint、Region 和 AccessKey。",
         )
     )
 

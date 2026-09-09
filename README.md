@@ -48,7 +48,10 @@ copy .env.example .env
 copy accounts.example.json accounts.json
 ```
 
-4. 按 [配置说明](docs/configuration.md) 填写 OSS 和妙手账号信息。
+4. 按 [配置说明](docs/configuration.md) 填写自己的 OSS 和妙手账号信息。
+
+   公开仓库不会包含任何可用密钥。每个人下载后都要在本机或服务器的 `.env` 里填写自己的 `OSS_BUCKET`、`OSS_ENDPOINT`、`OSS_REGION` 和 OSS AccessKey，程序才会把上传图片保存到他自己的 OSS。
+
 5. 启动网页：
 
 ```bash
