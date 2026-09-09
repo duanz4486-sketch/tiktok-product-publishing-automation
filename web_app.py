@@ -7,11 +7,9 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, message="'cgi' is deprecated.*")
 import cgi
 import threading
-import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 from batch_tiktok_collect import DEFAULT_TEMPLATE, SHOP_ID, TEMPLATES, post as miaoshou_post, read_items, run_batch
 from miaoshou_tool import accounts as account_module
@@ -23,6 +21,9 @@ from miaoshou_tool import config as config_module
 from miaoshou_tool import errors as error_module
 from miaoshou_tool import files as file_module
 from miaoshou_tool import forms as form_module
+from miaoshou_tool import http_context
+from miaoshou_tool import http_server
+from miaoshou_tool import job_runners
 from miaoshou_tool import jobs as job_module
 from miaoshou_tool import json_io
 from miaoshou_tool import miaoshou_api
@@ -32,6 +33,7 @@ from miaoshou_tool import page_requests
 from miaoshou_tool import publishing as publishing_module
 from miaoshou_tool import rendering
 from miaoshou_tool import self_check
+from miaoshou_tool import service_bridge
 from miaoshou_tool import single_product as single_product_module
 from miaoshou_tool import single_pages
 from miaoshou_tool import single_requests
@@ -81,23 +83,23 @@ def stage_batch_images(form: cgi.FieldStorage, upload_dir: Path, image_root: Pat
 
 
 def load_local_env() -> None:
-    account_module.load_local_env()
+    service_bridge.load_local_env(globals())
 
 
 def oss_credentials() -> tuple[str, str, str]:
-    return oss_upload.oss_credentials()
+    return service_bridge.oss_credentials(globals())
 
 
 def put_oss_object(file_path: Path, object_key: str) -> None:
-    oss_upload.put_oss_object(file_path, object_key)
+    service_bridge.put_oss_object(file_path, object_key, globals())
 
 
 def upload_images_to_oss(image_root: Path, image_prefix: str, seqs: list[int]) -> int:
-    return oss_upload.upload_images_to_oss(image_root, image_prefix, seqs, put_object=put_oss_object)
+    return service_bridge.upload_images_to_oss(image_root, image_prefix, seqs, globals())
 
 
 def upload_source_files_to_oss(image_prefix: str, source_files: list[tuple[Path, str]]) -> int:
-    return oss_upload.upload_source_files_to_oss(image_prefix, source_files, put_object=put_oss_object)
+    return service_bridge.upload_source_files_to_oss(image_prefix, source_files, globals())
 
 
 upload_filename = file_module.upload_filename
@@ -116,26 +118,25 @@ expect_miaoshou_success = miaoshou_api.expect_miaoshou_success
 
 
 def get_tiktok_shops(credentials: tuple[str, str]) -> list[dict]:
-    return miaoshou_api.get_tiktok_shops(credentials, miaoshou_post)
+    return service_bridge.get_tiktok_shops(credentials, globals())
 
 
 pick_warehouse = miaoshou_api.pick_warehouse
 
 
 def get_default_warehouse_ids(shop_ids: list[int], credentials: tuple[str, str]) -> dict[str, str]:
-    return miaoshou_api.get_default_warehouse_ids(shop_ids, credentials, miaoshou_post)
+    return service_bridge.get_default_warehouse_ids(shop_ids, credentials, globals())
 
 
 flatten_category_tree = miaoshou_api.flatten_category_tree
 
 
 def load_categories(credentials: tuple[str, str]) -> list[dict]:
-    with CATEGORY_CACHE_LOCK:
-        return miaoshou_api.load_categories(credentials, miaoshou_post, CATEGORY_CACHE)
+    return service_bridge.load_categories(credentials, globals())
 
 
 def get_category_metadata(cid: int, credentials: tuple[str, str], shop_ids: list[int] | None = None) -> dict:
-    return miaoshou_api.get_category_metadata(cid, credentials, miaoshou_post, shop_ids)
+    return service_bridge.get_category_metadata(cid, credentials, shop_ids, globals())
 
 
 save_uploaded_file = file_module.save_uploaded_file
@@ -145,19 +146,19 @@ uploaded_video_file = file_module.uploaded_video_file
 
 
 def upload_single_images(files: list[Path], object_prefix: str) -> list[str]:
-    return oss_upload.upload_single_images(files, object_prefix, put_object=put_oss_object)
+    return service_bridge.upload_single_images(files, object_prefix, globals())
 
 
 def upload_single_video(file_path: Path | None, object_prefix: str) -> str:
-    return oss_upload.upload_single_video(file_path, object_prefix, put_object=put_oss_object)
+    return service_bridge.upload_single_video(file_path, object_prefix, globals())
 
 
 def load_ai_settings() -> dict:
-    return ai_module.load_ai_settings(load_local_env)
+    return service_bridge.load_ai_settings(globals())
 
 
 def save_ai_settings(settings: dict) -> None:
-    ai_module.save_ai_settings(settings, load_ai_settings)
+    service_bridge.save_ai_settings(settings, globals())
 
 
 image_data_url = ai_module.image_data_url
@@ -169,35 +170,35 @@ normalize_chat_completions_url = ai_module.normalize_chat_completions_url
 
 
 def call_openai_compatible_chat(settings: dict, content: list[dict], timeout: int = 90) -> str:
-    return ai_module.call_openai_compatible_chat(settings, content, timeout, urllib.request.urlopen)
+    return service_bridge.call_openai_compatible_chat(settings, content, timeout, globals())
 
 
 def call_deepseek_ai(title: str, notes: str, image_files: list[Path], metadata: dict) -> dict:
-    return ai_module.call_ai(title, notes, image_files, metadata, load_ai_settings(), call_openai_compatible_chat)
+    return service_bridge.call_deepseek_ai(title, notes, image_files, metadata, globals())
 
 
 def test_ai_settings(settings: dict) -> None:
-    ai_module.test_ai_settings(settings, call_openai_compatible_chat)
+    service_bridge.test_ai_settings(settings, globals())
 
 
 def ai_settings_from_form(form: cgi.FieldStorage) -> dict:
-    return ai_module.ai_settings_from_form(form, field_text)
+    return service_bridge.ai_settings_from_form(form, globals())
 
 
 def settings_for_ai_test(posted: dict) -> dict:
-    return ai_module.settings_for_ai_test(posted, load_ai_settings())
+    return service_bridge.settings_for_ai_test(posted, globals())
 
 
 def ai_configured() -> bool:
-    return ai_module.ai_configured(load_ai_settings())
+    return service_bridge.ai_configured(globals())
 
 
 def merge_ai_attributes(product_attrs: list[dict], suggestion_attrs: list[dict], metadata: dict) -> list[dict]:
-    return ai_module.merge_ai_attributes(product_attrs, suggestion_attrs, metadata)
+    return service_bridge.merge_ai_attributes(product_attrs, suggestion_attrs, metadata, globals())
 
 
 def build_common_single_product(item_num: str, credentials: tuple[str, str], title: str, notes: str, image_urls: list[str], skus: list[dict], spec_name: str, weight: float, package_length: float, package_width: float, package_height: float, video_url: str = "") -> int:
-    return publishing_module.build_common_single_product(
+    return service_bridge.build_common_single_product(
         item_num,
         credentials,
         title,
@@ -209,24 +210,24 @@ def build_common_single_product(item_num: str, credentials: tuple[str, str], tit
         package_length,
         package_width,
         package_height,
-        miaoshou_post,
         video_url,
+        globals(),
     )
 
 
 def build_product_attributes(form: cgi.FieldStorage, metadata: dict) -> list[dict]:
-    return publishing_module.build_product_attributes(form, metadata, field_text)
+    return service_bridge.build_product_attributes(form, metadata, globals())
 
 
 custom_value_id = publishing_module.custom_value_id
 
 
 def get_site_info(detail_id: int, credentials: tuple[str, str]) -> tuple[str, dict]:
-    return publishing_module.get_site_info(detail_id, credentials, miaoshou_post)
+    return service_bridge.get_site_info(detail_id, credentials, globals())
 
 
 def save_site_product(detail_id: int, credentials: tuple[str, str], site_info: dict, oss_md5: str, title: str, notes: str, image_urls: list[str], cid: int, product_attrs: list[dict], sale_attr_id: str, spec_name: str, skus: list[dict], shop_ids: list[int], weight: float, package_length: float, package_width: float, package_height: float, warehouse_ids: dict[str, str] | None = None, video_url: str = "") -> None:
-    publishing_module.save_site_product(
+    service_bridge.save_site_product(
         detail_id,
         credentials,
         site_info,
@@ -244,72 +245,45 @@ def save_site_product(detail_id: int, credentials: tuple[str, str], site_info: d
         package_length,
         package_width,
         package_height,
-        miaoshou_post,
         warehouse_ids,
         video_url,
+        globals(),
     )
 
 
 def claim_tiktok_to_shops(detail_id: int, shop_ids: list[int], credentials: tuple[str, str]) -> None:
-    publishing_module.claim_tiktok_to_shops(detail_id, shop_ids, credentials, miaoshou_post)
+    service_bridge.claim_tiktok_to_shops(detail_id, shop_ids, credentials, globals())
 
 
 def claim_common_to_tiktok_single(common_id: int, credentials: tuple[str, str]) -> int:
-    return publishing_module.claim_common_to_tiktok_single(common_id, credentials, miaoshou_post)
+    return service_bridge.claim_common_to_tiktok_single(common_id, credentials, globals())
 
 
 def delete_common_collect_products(detail_ids: list[int], credentials: tuple[str, str]) -> None:
-    publishing_module.delete_common_collect_products(detail_ids, credentials, miaoshou_post)
+    service_bridge.delete_common_collect_products(detail_ids, credentials, globals())
 
 
 def delete_tiktok_collect_products(detail_ids: list[int], credentials: tuple[str, str]) -> None:
-    publishing_module.delete_tiktok_collect_products(detail_ids, credentials, miaoshou_post)
+    service_bridge.delete_tiktok_collect_products(detail_ids, credentials, globals())
 
 
 def cleanup_created_single_product(common_id: int | None, detail_id: int | None, credentials: tuple[str, str]) -> list[str]:
-    return single_product_module.cleanup_created_single_product(
-        common_id,
-        detail_id,
-        credentials,
-        delete_tiktok_collect_products,
-        delete_common_collect_products,
-    )
+    return service_bridge.cleanup_created_single_product(common_id, detail_id, credentials, globals())
 
 
 resolve_skus = publishing_module.resolve_skus
 
 
 def parse_sku_rows(form: cgi.FieldStorage, sku_image_paths: dict[str, Path] | None = None) -> tuple[str, str, list[dict]]:
-    return publishing_module.parse_sku_rows(form, field_text, field_list, sku_image_paths)
+    return service_bridge.parse_sku_rows(form, sku_image_paths, globals())
 
 
 def run_single_job(job_id: str, params: dict) -> None:
-    single_product_module.run_single_job(
-        job_id,
-        params,
-        {
-            "set_job": set_job,
-            "upload_single_images": upload_single_images,
-            "upload_single_video": upload_single_video,
-            "resolve_skus": resolve_skus,
-            "call_deepseek_ai": call_deepseek_ai,
-            "merge_ai_attributes": merge_ai_attributes,
-            "readable_error_text": readable_error_text,
-            "build_common_single_product": build_common_single_product,
-            "claim_common_to_tiktok_single": claim_common_to_tiktok_single,
-            "get_site_info": get_site_info,
-            "get_default_warehouse_ids": get_default_warehouse_ids,
-            "save_site_product": save_site_product,
-            "claim_tiktok_to_shops": claim_tiktok_to_shops,
-            "miaoshou_post": miaoshou_post,
-            "cleanup_created_single_product": cleanup_created_single_product,
-            "run_root": RUN_ROOT,
-        },
-    )
+    job_runners.run_single_job(job_id, params, globals())
 
 
 def start_single_job(job_id: str, params: dict) -> None:
-    job_module.start_daemon(run_single_job, job_id, params)
+    job_runners.start_single_job(job_id, params, globals())
 
 
 image_seq_dirs = file_module.image_seq_dirs
@@ -325,8 +299,7 @@ progress_html = job_module.progress_html
 
 
 def active_account_job_id(account_id: str) -> str | None:
-    with JOBS_LOCK:
-        return active_job_id_unlocked(account_id)
+    return job_runners.active_account_job_id(account_id, globals())
 
 
 STATUS_LABELS = rendering.STATUS_LABELS
@@ -352,27 +325,15 @@ shop_name_from_shops = account_module.shop_name_from_shops
 
 
 def discover_templates(credentials: tuple[str, str], requested_shop_id: int | None = None) -> tuple[int, dict[str, int], str]:
-    return account_module.discover_templates(credentials, miaoshou_post, requested_shop_id)
+    return service_bridge.discover_templates(credentials, requested_shop_id, globals())
 
 
 def run_job(job_id: str, params: dict) -> None:
-    batch_jobs.run_batch_job(
-        job_id,
-        params,
-        {
-            "jobs": JOBS,
-            "jobs_lock": JOBS_LOCK,
-            "set_job": set_job,
-            "upload_source_files_to_oss": upload_source_files_to_oss,
-            "upload_images_to_oss": upload_images_to_oss,
-            "run_batch": run_batch,
-            "run_root": RUN_ROOT,
-        },
-    )
+    job_runners.run_job(job_id, params, globals())
 
 
 def start_job(job_id: str, params: dict) -> None:
-    batch_jobs.start_batch_job(job_module.start_daemon, run_job, job_id, params)
+    job_runners.start_job(job_id, params, globals())
 
 
 def render_page(title: str, body: str, refresh: bool = False, header_right: str = "") -> bytes:
@@ -513,238 +474,11 @@ def render_failure_page(title: str, error: object, back_url: str, back_label: st
     )
 
 
-class Handler(BaseHTTPRequestHandler):
-    def current_username(self) -> str | None:
-        return DEFAULT_OPERATOR
+def handler_deps() -> dict[str, object]:
+    return http_context.route_deps(globals())
 
-    def redirect(self, location: str) -> None:
-        self.send_response(303)
-        self.send_header("Location", location)
-        self.end_headers()
 
-    def send_html(self, content: bytes, status: int = 200) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
-
-    def send_json(self, payload: dict, status: int = 200) -> None:
-        content = json_io.dumps(payload, compact=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
-
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/login":
-            self.redirect("/")
-            return
-        username = DEFAULT_OPERATOR
-        if parsed.path == "/":
-            self.send_html(render_home(username))
-            return
-        if parsed.path == "/check":
-            self.send_html(render_release_check(username))
-            return
-        if parsed.path == "/single":
-            self.send_html(render_single(username, parse_qs(parsed.query)))
-            return
-        if parsed.path == "/ai-settings":
-            query = parse_qs(parsed.query)
-            self.send_html(render_ai_settings(username, query.get("message", [""])[0], query.get("error", [""])[0]))
-            return
-        if parsed.path == "/accounts":
-            query = parse_qs(parsed.query)
-            self.send_html(render_accounts(username, query.get("message", [""])[0], query.get("error", [""])[0]))
-            return
-        if parsed.path == "/accounts/confirm":
-            token = parse_qs(parsed.query).get("token", [""])[0]
-            self.send_html(render_account_confirm(username, token))
-            return
-        if parsed.path == "/job":
-            job_id = parse_qs(parsed.query).get("id", [""])[0]
-            self.send_html(render_job(job_id, username))
-            return
-        self.send_html(render_page("未找到", '<section><h2>未找到</h2><p><a href="/">返回首页</a></p></section>'), 404)
-
-    def do_POST(self) -> None:
-        path = urlparse(self.path).path
-        if path == "/login":
-            self.redirect("/")
-            return
-        if path == "/logout":
-            self.redirect("/")
-            return
-        if path == "/ai-settings":
-            try:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
-                )
-                self.redirect(
-                    ai_requests.handle_ai_settings_form(
-                        form,
-                        {
-                            "ai_settings_from_form": ai_settings_from_form,
-                            "field_text": field_text,
-                            "test_ai_settings": test_ai_settings,
-                            "settings_for_ai_test": settings_for_ai_test,
-                            "save_ai_settings": save_ai_settings,
-                        },
-                    )
-                )
-            except Exception as exc:
-                self.redirect("/ai-settings?error=" + urllib.parse.quote(str(exc)))
-            return
-        if path == "/single/ai-suggest":
-            try:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
-                )
-                suggestion = ai_requests.suggest_single_product(
-                    form,
-                    {
-                        "load_accounts_config": load_accounts_config,
-                        "field_text": field_text,
-                        "field_list": field_list,
-                        "int_field": int_field,
-                        "account_credentials": account_credentials,
-                        "require_english": require_english,
-                        "get_category_metadata": get_category_metadata,
-                        "uploaded_image_files": uploaded_image_files,
-                        "upload_root": UPLOAD_ROOT,
-                        "call_deepseek_ai": call_deepseek_ai,
-                    },
-                )
-                self.send_json({"ok": True, "suggestion": suggestion})
-            except Exception as exc:
-                self.send_json({"ok": False, "error": readable_error_text(exc) or str(exc)}, 400)
-            return
-        if path == "/single/create":
-            username = DEFAULT_OPERATOR
-            try:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
-                )
-                result = single_requests.create_single_job(
-                    form,
-                    username,
-                    {
-                        "load_accounts_config": load_accounts_config,
-                        "all_account_ids": all_account_ids,
-                        "field_text": field_text,
-                        "field_list": field_list,
-                        "int_field": int_field,
-                        "decimal_field": decimal_field,
-                        "account_credentials": account_credentials,
-                        "require_english": require_english,
-                        "get_category_metadata": get_category_metadata,
-                        "build_product_attributes": build_product_attributes,
-                        "uploaded_sku_image_files": uploaded_sku_image_files,
-                        "parse_sku_rows": parse_sku_rows,
-                        "uploaded_image_files": uploaded_image_files,
-                        "uploaded_video_file": uploaded_video_file,
-                        "clean_prefix": clean_prefix,
-                        "upload_root": UPLOAD_ROOT,
-                        "jobs": JOBS,
-                        "jobs_lock": JOBS_LOCK,
-                        "active_job_id_unlocked": active_job_id_unlocked,
-                        "single_job_record": job_module.single_job_record,
-                        "start_single_job": start_single_job,
-                    },
-                )
-                if result["status"] == "active":
-                    active_id = result["active_id"]
-                    account_count = int(result["account_count"])
-                    body = f"""{render_top_nav("single")}<section>{alert_html("warn", "这个妙手账号正在处理上一批。同一个妙手账号完成前不能提交下一批。")}<p><a href="/job?id={e(active_id)}">查看当前任务</a></p></section>"""
-                    self.send_html(render_page("这个账号正在处理", body, refresh=True, header_right=render_account_menu(username, account_count)), 409)
-                    return
-                self.send_response(303)
-                self.send_header("Location", f"/job?id={result['job_id']}")
-                self.end_headers()
-            except Exception as exc:
-                self.send_html(render_failure_page("创建单产品任务失败", exc, "/single", "返回单产品上传", username), 400)
-            return
-        if path in {"/accounts/add", "/accounts/confirm", "/accounts/rename", "/accounts/update", "/accounts/delete", "/accounts/toggle-lock"}:
-            try:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
-                )
-                config = load_accounts_config()
-                location = account_module.handle_account_post(
-                    path,
-                    form,
-                    config,
-                    PENDING_ACCOUNTS,
-                    PENDING_ACCOUNTS_LOCK,
-                    discover_templates,
-                    active_account_job_id,
-                )
-                self.redirect(location)
-            except Exception as exc:
-                self.redirect("/accounts?error=" + urllib.parse.quote(str(exc)))
-            return
-        if path != "/run":
-            self.send_html(render_page("未找到", '<section><h2>未找到</h2></section>'), 404)
-            return
-        username = DEFAULT_OPERATOR
-        try:
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
-            )
-            result = batch_requests.create_batch_job(
-                form,
-                username,
-                {
-                    "load_accounts_config": load_accounts_config,
-                    "all_account_ids": all_account_ids,
-                    "field_text": field_text,
-                    "upload_filename": upload_filename,
-                    "save_upload": save_upload,
-                    "stage_batch_images": stage_batch_images,
-                    "read_items": read_items,
-                    "resolve_image_layout": resolve_image_layout,
-                    "image_seq_dirs": image_seq_dirs,
-                    "build_preflight_failures": build_preflight_failures,
-                    "upload_root": UPLOAD_ROOT,
-                    "run_root": RUN_ROOT,
-                    "accounts_path": ACCOUNTS_PATH,
-                    "jobs": JOBS,
-                    "jobs_lock": JOBS_LOCK,
-                    "active_job_id_unlocked": active_job_id_unlocked,
-                    "batch_job_record": job_module.batch_job_record,
-                    "start_job": start_job,
-                    "templates": TEMPLATES,
-                    "default_template": DEFAULT_TEMPLATE,
-                    "default_shop_id": SHOP_ID,
-                },
-            )
-            if result["status"] == "active":
-                active_id = result["active_id"]
-                account_count = int(result["account_count"])
-                body = f"""{render_top_nav("batch")}<section>{alert_html("warn", "这个妙手账号正在处理上一批。同一个妙手账号完成前不能提交下一批，避免标题和图片错配。")}<p><a href="/job?id={e(active_id)}">查看当前批次</a></p></section>"""
-                self.send_html(render_page("这个账号正在处理", body, refresh=True, header_right=render_account_menu(username, account_count)), 409)
-                return
-            self.send_response(303)
-            self.send_header("Location", f"/job?id={result['job_id']}")
-            self.end_headers()
-        except Exception as exc:
-            self.send_html(render_failure_page("创建任务失败", exc, "/", "返回首页", username), 400)
-
-    def log_message(self, format: str, *args) -> None:
-        return
+Handler = http_server.make_handler(handler_deps, json_io.dumps)
 
 
 def main() -> int:
