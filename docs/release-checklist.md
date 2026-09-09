@@ -36,6 +36,14 @@ python scripts/check_setup.py
 python test_web_app.py
 ```
 
+## 服务器公开前必须确认
+
+- `.env` 已设置 `WEB_ACCESS_PASSWORD`。
+- `.env` 已设置 `WEB_SESSION_SECRET`。
+- 访问密码没有写进 README、代码、截图或 GitHub。
+- 阿里云安全组和系统防火墙只开放实际需要的端口。
+- 妙手账号和 AI/OSS 密钥只存在服务器本地配置文件中。
+
 ## 当前稳定入口
 
 稳定入口只有：

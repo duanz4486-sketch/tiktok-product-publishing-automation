@@ -93,3 +93,5 @@ python scripts/check_public_release.py
 - `app.err`
 
 仓库里的 `.gitignore` 已经默认排除了这些文件。公开仓库只应提交示例配置和代码。
+
+如果把网页开放给团队或公网访问，请在服务器 `.env` 中设置 `WEB_ACCESS_PASSWORD` 和 `WEB_SESSION_SECRET`。否则任何能访问该地址的人都可能使用服务器上保存的妙手账号。

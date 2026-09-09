@@ -6,7 +6,33 @@ import zipfile
 
 import batch_tiktok_collect
 import web_app
+from miaoshou_tool import access_gate
 from miaoshou_tool import json_io
+
+
+def test_access_gate_defaults_to_local_open_mode() -> None:
+    root = Path(tempfile.mkdtemp())
+
+    assert not access_gate.is_enabled(root)
+    assert access_gate.valid_request("", root)
+
+
+def test_access_gate_accepts_only_signed_session_cookie() -> None:
+    root = Path(tempfile.mkdtemp())
+    (root / ".env").write_text(
+        "WEB_ACCESS_PASSWORD=private-password\nWEB_SESSION_SECRET=session-secret\n",
+        encoding="utf-8",
+    )
+
+    assert access_gate.is_enabled(root)
+    assert not access_gate.valid_request("", root)
+    assert not access_gate.password_matches("wrong", root)
+    assert access_gate.password_matches("private-password", root)
+
+    cookie = access_gate.login_cookie(root)
+    assert "private-password" not in cookie
+    assert "session-secret" not in cookie
+    assert access_gate.valid_request(cookie, root)
 
 
 def test_zip_subset_is_used_as_source_of_truth() -> None:
@@ -114,7 +140,7 @@ def test_discover_templates_uses_template_keywords_and_shop_id() -> None:
                 {
                     "collectBoxDetailId": 1000 + index,
                     "collectGroupName": f"任意账号-{name}-参数",
-                    "collectBoxDetailShopList": [{"shopId": 555, "shopName": "Print & Purl"}],
+                    "collectBoxDetailShopList": [{"shopId": 555, "shopName": "Example Shop"}],
                 }
             )
         return {"result": "success", "data": {"detailList": detail_list}}
@@ -126,7 +152,7 @@ def test_discover_templates_uses_template_keywords_and_shop_id() -> None:
         web_app.miaoshou_post = old_post
 
     assert shop_id == 555
-    assert shop_name == "Print & Purl"
+    assert shop_name == "Example Shop"
     assert templates == {"大地毯": 1001, "非定制毛毯": 1002, "定制毛毯": 1003}
     assert web_app.matched_template_name(web_app.normalized_text({"group": "非定制毛毯参数"})) == "非定制毛毯"
 
@@ -136,20 +162,20 @@ def test_confirm_page_does_not_render_secrets() -> None:
     try:
         with web_app.PENDING_ACCOUNTS_LOCK:
             web_app.PENDING_ACCOUNTS[token] = {
-                "username": "duanhaha",
+                "username": "operator",
                 "name": "测试账号",
                 "shop_id": 555,
-                "shop_name": "Print & Purl",
+                "shop_name": "Example Shop",
                 "app_key": "ak_b123456789f69c",
                 "app_secret": "hidden_secret",
                 "templates": {"大地毯": 1001, "非定制毛毯": 1002, "定制毛毯": 1003},
             }
-        html = web_app.render_account_confirm("duanhaha", token).decode("utf-8")
+        html = web_app.render_account_confirm("operator", token).decode("utf-8")
     finally:
         with web_app.PENDING_ACCOUNTS_LOCK:
             web_app.PENDING_ACCOUNTS.pop(token, None)
 
-    assert "Print &amp; Purl" in html
+    assert "Example Shop" in html
     assert "555" in html
     assert "ak_b123456789f69c" not in html
     assert "hidden_secret" not in html
@@ -391,7 +417,7 @@ def test_single_form_uses_local_sku_image_upload() -> None:
             "categoryProductAttrList": [],
         }
 
-        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+        html = web_app.render_single("operator", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
 
         assert "单产品智能上传仍在开发和完善中" in html
         assert 'name="sku_image_file_0"' in html
@@ -537,7 +563,7 @@ def test_get_default_warehouse_ids_uses_default_then_first_available() -> None:
                 "shopWarehouseList": [
                     {
                         "shopId": 789,
-                        "shopName": "Print & Purl",
+                        "shopName": "Example Shop",
                         "warehouseList": [
                             {"warehouseId": "WH-A", "isDefault": "0"},
                             {"warehouseId": "WH-B", "isDefault": "1"},
@@ -717,7 +743,7 @@ def test_single_form_shows_required_category_attrs_before_package_fields() -> No
             "categoryConfig": {"packageDimensionIsRequired": "true"},
         }
 
-        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+        html = web_app.render_single("operator", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
 
         assert "材质 / Material" in html
         assert "选择类目后会显示必填属性" not in html
@@ -960,7 +986,7 @@ def test_single_form_renders_ai_suggestion_button() -> None:
             "categorySaleAttrList": [{"attrId": "size", "attributeNameAlias": "尺寸", "name": "Size"}],
             "categoryProductAttrList": [{"attrId": "material", "name": "Material", "isCustomized": "true"}],
         }
-        html = web_app.render_single("duanhaha", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
+        html = web_app.render_single("operator", {"account_id": ["acc"], "cid": ["3"]}).decode("utf-8")
     finally:
         (
             web_app.load_accounts_config,
@@ -1152,6 +1178,8 @@ def test_single_job_ai_failure_blocks_miaoshou_create() -> None:
 
 
 if __name__ == "__main__":
+    test_access_gate_defaults_to_local_open_mode()
+    test_access_gate_accepts_only_signed_session_cookie()
     test_zip_subset_is_used_as_source_of_truth()
     test_json_helpers_use_one_compact_safe_format()
     test_saved_account_form_can_edit_key_without_revealing_secret()

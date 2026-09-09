@@ -151,6 +151,31 @@ def run_release_check(root: Path = ROOT, accounts_path: Path = ACCOUNTS_PATH) ->
         )
     )
 
+    gate_password = _has_env("WEB_ACCESS_PASSWORD", env_values)
+    gate_secret = _has_env("WEB_SESSION_SECRET", env_values)
+    if gate_password and gate_secret:
+        checks.append(_check("access_gate", "网页访问保护", "ok", "已配置站点访问密码。"))
+    elif gate_password or gate_secret:
+        checks.append(
+            _check(
+                "access_gate",
+                "网页访问保护",
+                "error",
+                "站点访问密码配置不完整。",
+                "在 .env 里同时填写 WEB_ACCESS_PASSWORD 和 WEB_SESSION_SECRET，或两个都留空只用于本地测试。",
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "access_gate",
+                "网页访问保护",
+                "warn",
+                "未配置站点访问密码。本地测试可以忽略，公网部署前必须配置。",
+                "在 .env 里设置 WEB_ACCESS_PASSWORD 和 WEB_SESSION_SECRET。",
+            )
+        )
+
     checks.extend(_accounts_checks(accounts_path))
 
     if gitignore_path.exists():

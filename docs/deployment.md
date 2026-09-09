@@ -24,6 +24,15 @@ http://127.0.0.1:8002/
 
 ## 局域网或服务器运行
 
+先在服务器 `.env` 里设置网页访问保护：
+
+```env
+WEB_ACCESS_PASSWORD=一串足够长的访问密码
+WEB_SESSION_SECRET=另一串足够长的随机字符
+```
+
+这两个值不要提交到 GitHub。没有配置访问保护时，任何能访问 `http://服务器IP:8002/` 的人都可能打开网页并使用服务器上已保存的妙手账号。
+
 ```bash
 bash scripts/run_server.sh
 ```

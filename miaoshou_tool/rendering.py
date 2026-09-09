@@ -60,6 +60,7 @@ def account_menu(account_count: int) -> str:
     <a class="account-link" href="/single">单产品智能上传（开发中）</a>
     <a class="account-link" href="/ai-settings">AI 设置</a>
     <a class="account-link" href="/accounts">妙手账号管理</a>
+    <a class="account-link" href="/access-logout">退出访问验证</a>
   </div>
 </details>"""
 

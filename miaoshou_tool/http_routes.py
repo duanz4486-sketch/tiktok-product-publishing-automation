@@ -4,6 +4,9 @@ import cgi
 import urllib.parse
 from urllib.parse import parse_qs, urlparse
 
+from . import access_gate
+from .config import ROOT
+
 
 ACCOUNT_POST_PATHS = {
     "/accounts/add",
@@ -15,12 +18,69 @@ ACCOUNT_POST_PATHS = {
 }
 
 
+def _path(handler) -> str:
+    return urlparse(handler.path).path
+
+
 def _read_form(handler) -> cgi.FieldStorage:
     return cgi.FieldStorage(
         fp=handler.rfile,
         headers=handler.headers,
         environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": handler.headers.get("Content-Type", "")},
     )
+
+
+def _redirect_with_cookie(handler, location: str, cookie: str) -> None:
+    handler.send_response(303)
+    handler.send_header("Location", location)
+    handler.send_header("Set-Cookie", cookie)
+    handler.end_headers()
+
+
+def _send_access_login(handler, error: str = "", status: int = 401) -> None:
+    handler.send_html(access_gate.render_login(error), status)
+
+
+def _access_allowed(handler) -> bool:
+    if access_gate.is_misconfigured(ROOT):
+        return False
+    return access_gate.valid_request(handler.headers.get("Cookie", ""), ROOT)
+
+
+def _handle_access_get(handler, path: str) -> bool:
+    if path == "/access-login":
+        if _access_allowed(handler):
+            handler.redirect("/")
+        else:
+            _send_access_login(handler, status=200)
+        return True
+    if path == "/access-logout":
+        _redirect_with_cookie(handler, "/access-login", access_gate.logout_cookie())
+        return True
+    if not _access_allowed(handler):
+        message = "站点访问密码配置不完整，请同时设置 WEB_ACCESS_PASSWORD 和 WEB_SESSION_SECRET。" if access_gate.is_misconfigured(ROOT) else ""
+        _send_access_login(handler, message)
+        return True
+    return False
+
+
+def _handle_access_post(handler, path: str) -> bool:
+    if path == "/access-login":
+        form = _read_form(handler)
+        password = str(form.getfirst("password", "") or "")
+        if access_gate.password_matches(password, ROOT):
+            _redirect_with_cookie(handler, "/", access_gate.login_cookie(ROOT))
+        else:
+            _send_access_login(handler, "访问密码不正确。")
+        return True
+    if path == "/access-logout":
+        _redirect_with_cookie(handler, "/access-login", access_gate.logout_cookie())
+        return True
+    if not _access_allowed(handler):
+        message = "站点访问密码配置不完整，请同时设置 WEB_ACCESS_PASSWORD 和 WEB_SESSION_SECRET。" if access_gate.is_misconfigured(ROOT) else ""
+        _send_access_login(handler, message)
+        return True
+    return False
 
 
 def _redirect_to_job(handler, job_id: str) -> None:
@@ -48,6 +108,8 @@ def _send_active_job(handler, current: str, message: str, active_id: str, accoun
 
 def handle_get(handler, deps: dict) -> None:
     parsed = urlparse(handler.path)
+    if _handle_access_get(handler, parsed.path):
+        return
     if parsed.path == "/login":
         handler.redirect("/")
         return
@@ -81,7 +143,9 @@ def handle_get(handler, deps: dict) -> None:
 
 
 def handle_post(handler, deps: dict) -> None:
-    path = urlparse(handler.path).path
+    path = _path(handler)
+    if _handle_access_post(handler, path):
+        return
     if path == "/login":
         handler.redirect("/")
         return

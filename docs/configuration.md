@@ -38,13 +38,34 @@ OPENAI_API_KEY=your_openai_key
 DASHSCOPE_API_KEY=your_dashscope_key
 ARK_API_KEY=your_volcengine_key
 AI_API_KEY=your_custom_openai_compatible_key
+WEB_ACCESS_PASSWORD=your_long_private_web_password
+WEB_SESSION_SECRET=your_different_long_random_secret
 ```
 
 说明：
 
 - OSS 密钥用于把本次上传的图片写入阿里云 OSS。
 - AI 密钥只给开发中的单产品 / 单个链接智能上传入口使用；模板批量上传不依赖 AI。
+- `WEB_ACCESS_PASSWORD` 和 `WEB_SESSION_SECRET` 用于保护网页入口。只在服务器或局域网共享时需要，本地自己测试可以不填。
 - 如果 `.env` 已经存在，不要用示例文件覆盖真实文件。
+
+## 网页访问保护
+
+如果网页只在自己电脑 `127.0.0.1` 使用，可以不设置访问密码。
+
+如果网页通过服务器 IP、局域网 IP、Tailscale、Cloudflare Tunnel 或其他方式给别人访问，建议必须设置：
+
+```env
+WEB_ACCESS_PASSWORD=一串足够长的访问密码
+WEB_SESSION_SECRET=另一串足够长的随机字符
+```
+
+说明：
+
+- 访问密码只保护这个网页入口，不是妙手账号密码。
+- 这两个值只放在服务器 `.env`，不要写进代码、README、截图或 GitHub。
+- 两个值必须同时填写；只填一个时系统自检会报错。
+- 开源用户下载项目后，可以设置自己的访问密码。
 
 ## `accounts.json`
 
